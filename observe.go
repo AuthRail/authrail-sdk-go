@@ -3,6 +3,7 @@ package authrail
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,25 +25,52 @@ type Client struct {
 	http     *http.Client
 }
 
+type Config struct {
+	SidecarURL   string
+	AdapterToken string
+	HTTPClient   *http.Client
+}
+
+// Operation identifies the reviewed action and a stable key from the workflow.
+type Operation struct {
+	VersionID   string
+	ActionKey   string
+	PrincipalID string
+	SessionID   string
+	ResourceID  string
+}
+
 type Call struct {
 	RequestID          string
 	OperationVersionID string
 	ActionKey          string
+	PrincipalID        string
+	SessionID          string
+	ResourceID         string
 	Arguments          json.RawMessage
 }
 
+type attribution struct {
+	PrincipalID string  `json:"principalId"`
+	SessionID   string  `json:"sessionId"`
+	ResourceID  *string `json:"resourceId"`
+}
+
 type Decision struct {
-	RequestID      string   `json:"requestId"`
-	Mode           string   `json:"mode"`
-	Enforced       bool     `json:"enforced"`
-	Coverage       string   `json:"coverage"`
-	Outcome        string   `json:"outcome"`
-	Sequence       int64    `json:"sequence"`
-	BundleID       *string  `json:"bundleId"`
-	RailVersionIDs []string `json:"railVersionIds"`
-	MatchedRuleIDs []string `json:"matchedRuleIds"`
-	ReasonCodes    []string `json:"reasonCodes"`
-	Unresolved     []struct {
+	RequestID       string   `json:"requestId"`
+	Mode            string   `json:"mode"`
+	Enforced        bool     `json:"enforced"`
+	Coverage        string   `json:"coverage"`
+	Outcome         string   `json:"outcome"`
+	Sequence        int64    `json:"sequence"`
+	BundleID        *string  `json:"bundleId"`
+	RailVersionIDs  []string `json:"railVersionIds"`
+	MatchedRuleIDs  []string `json:"matchedRuleIds"`
+	ReasonCodes     []string `json:"reasonCodes"`
+	RecordingStatus string   `json:"recordingStatus"`
+	ActionID        string   `json:"actionId"`
+	CertificateID   string   `json:"certificateId"`
+	Unresolved      []struct {
 		Root   string   `json:"root"`
 		Path   []string `json:"path"`
 		Reason string   `json:"reason"`
@@ -57,15 +85,16 @@ type Observation struct {
 	ResultError    error
 }
 
-func NewClient(sidecarURL, adapterToken string, transport *http.Client) (*Client, error) {
-	u, err := url.Parse(sidecarURL)
+func NewClient(config Config) (*Client, error) {
+	u, err := url.Parse(config.SidecarURL)
 	if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
 		u.Path != "" || u.Hostname() != "127.0.0.1" && u.Hostname() != "::1" {
 		return nil, errors.New("sidecar URL must be a local HTTP address")
 	}
-	if len(adapterToken) < 32 {
+	if len(config.AdapterToken) < 32 {
 		return nil, errors.New("adapter token must have at least 32 characters")
 	}
+	transport := config.HTTPClient
 	if transport == nil {
 		transport = &http.Client{}
 	}
@@ -74,18 +103,66 @@ func NewClient(sidecarURL, adapterToken string, transport *http.Client) (*Client
 		copyClient.Timeout = 2 * time.Second
 	}
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{endpoint: strings.TrimRight(sidecarURL, "/") + "/evaluate", token: adapterToken, http: &copyClient}, nil
+	return &Client{endpoint: strings.TrimRight(config.SidecarURL, "/") + "/evaluate", token: config.AdapterToken, http: &copyClient}, nil
 }
 
-// Observe starts advisory checks, runs the tool once, and returns its result
-// without waiting for the sidecar. The buffered channel delivers diagnostics
-// after the call and result checks finish.
-func (c *Client) Observe(ctx context.Context, call Call,
+// Observe wraps a function while preserving its Go result and error. The
+// buffered channel reports advisory checks after the function returns.
+func Observe[Input, Output any](ctx context.Context, client *Client, operation Operation,
+	input Input, execute func(context.Context) (Output, error)) (Output, <-chan Observation, error) {
+	var output Output
+	if execute == nil {
+		return output, nil, errors.New("tool function is required")
+	}
+	if client == nil {
+		output, toolError := execute(ctx)
+		completed := make(chan Observation, 1)
+		completed <- Observation{CallError: errors.New("sidecar client is missing"),
+			ResultError: errors.New("sidecar client is missing")}
+		close(completed)
+		return output, completed, toolError
+	}
+	requestID, requestError := newRequestID()
+	arguments, argumentError := json.Marshal(input)
+	if requestError != nil || argumentError != nil {
+		arguments = nil
+	}
+	call := Call{RequestID: requestID, OperationVersionID: operation.VersionID,
+		ActionKey: operation.ActionKey, PrincipalID: operation.PrincipalID,
+		SessionID: operation.SessionID, ResourceID: operation.ResourceID, Arguments: arguments}
+	raw, completed, toolError := client.observeRaw(ctx, call, func(ctx context.Context) (json.RawMessage, error) {
+		var err error
+		output, err = execute(ctx)
+		if err != nil {
+			return nil, err
+		}
+		encoded, marshalError := json.Marshal(output)
+		if marshalError != nil {
+			return nil, nil
+		}
+		return encoded, nil
+	})
+	_ = raw
+	return output, completed, toolError
+}
+
+// observeRaw starts checks without delaying or changing the tool's execution.
+func (c *Client) observeRaw(ctx context.Context, call Call,
 	execute func(context.Context) (json.RawMessage, error)) (json.RawMessage, <-chan Observation, error) {
-	if execute == nil || !uuidPattern.MatchString(call.RequestID) ||
+	if execute == nil {
+		return nil, nil, errors.New("tool function is required")
+	}
+	if !uuidPattern.MatchString(call.RequestID) ||
 		!uuidPattern.MatchString(call.OperationVersionID) || !keyPattern.MatchString(call.ActionKey) ||
+		!keyPattern.MatchString(call.PrincipalID) || !keyPattern.MatchString(call.SessionID) ||
+		(call.ResourceID != "" && !keyPattern.MatchString(call.ResourceID)) ||
 		!jsonObject(call.Arguments) {
-		return nil, nil, errors.New("call contract is invalid")
+		result, toolError := execute(ctx)
+		completed := make(chan Observation, 1)
+		completed <- Observation{CallError: errors.New("Observe call contract is invalid"),
+			ResultError: errors.New("Observe call contract is invalid")}
+		close(completed)
+		return result, completed, toolError
 	}
 	observation := make(chan Observation, 1)
 	checkContext := context.WithoutCancel(ctx)
@@ -119,6 +196,16 @@ func (c *Client) Observe(ctx context.Context, call Call,
 	return result, observation, toolError
 }
 
+func newRequestID() (string, error) {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", err
+	}
+	bytes[6] = (bytes[6] & 0x0f) | 0x40
+	bytes[8] = (bytes[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16]), nil
+}
+
 func (c *Client) evaluate(ctx context.Context, call Call, phase string, result json.RawMessage) (*Decision, error) {
 	body, err := json.Marshal(struct {
 		FormatVersion      int             `json:"formatVersion"`
@@ -127,7 +214,11 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase string, result j
 		Phase              string          `json:"phase"`
 		Arguments          json.RawMessage `json:"arguments"`
 		Result             json.RawMessage `json:"result,omitempty"`
-	}{1, call.RequestID, call.OperationVersionID, phase, call.Arguments, result})
+		Attribution        attribution     `json:"attribution"`
+	}{FormatVersion: 1, RequestID: call.RequestID, OperationVersionID: call.OperationVersionID,
+		Phase: phase, Arguments: call.Arguments, Result: result,
+		Attribution: attribution{PrincipalID: call.PrincipalID,
+			SessionID: call.SessionID, ResourceID: optionalRef(call.ResourceID)}})
 	if err != nil {
 		return nil, err
 	}
@@ -156,6 +247,13 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase string, result j
 		return nil, errors.New("sidecar decision contract is invalid")
 	}
 	return &decision, nil
+}
+
+func optionalRef(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func validOutcome(value string) bool {

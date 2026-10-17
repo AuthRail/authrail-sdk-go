@@ -14,7 +14,8 @@ import (
 func sampleCall() Call {
 	return Call{RequestID: "00000000-0000-4000-8000-000000000009",
 		OperationVersionID: "00000000-0000-4000-8000-000000000008",
-		ActionKey:          "invoice-123", Arguments: json.RawMessage(`{"amount":101}`)}
+		ActionKey:          "invoice-123", PrincipalID: "staff_123", SessionID: "task_123",
+		Arguments: json.RawMessage(`{"amount":101}`)}
 }
 
 func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
@@ -29,8 +30,13 @@ func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 			return
 		}
 		var body struct {
-			Phase  string          `json:"phase"`
-			Result json.RawMessage `json:"result"`
+			Phase       string          `json:"phase"`
+			Result      json.RawMessage `json:"result"`
+			Attribution struct {
+				PrincipalID string  `json:"principalId"`
+				SessionID   string  `json:"sessionId"`
+				ResourceID  *string `json:"resourceId"`
+			} `json:"attribution"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
@@ -41,6 +47,10 @@ func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 		if body.Phase == "tool_result" && string(body.Result) != `{"status":"done"}` {
 			t.Errorf("result was not checked: %s", body.Result)
 		}
+		if body.Attribution.PrincipalID != "staff_123" ||
+			body.Attribution.SessionID != "task_123" || body.Attribution.ResourceID != nil {
+			t.Errorf("adapter attribution was lost: %+v", body.Attribution)
+		}
 		outcome := "deny"
 		if body.Phase == "tool_result" {
 			outcome = "allow"
@@ -50,12 +60,12 @@ func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 			"mode": "observe", "enforced": false, "coverage": "evaluated", "outcome": outcome})
 	}))
 	defer server.Close()
-	client, err := NewClient(server.URL, "abcdefghijklmnopqrstuvwxyz012345", nil)
+	client, err := NewClient(Config{SidecarURL: server.URL, AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	executed := 0
-	result, completed, err := client.Observe(context.Background(), sampleCall(), func(context.Context) (json.RawMessage, error) {
+	result, completed, err := client.observeRaw(context.Background(), sampleCall(), func(context.Context) (json.RawMessage, error) {
 		executed++
 		return json.RawMessage(`{"status":"done"}`), nil
 	})
@@ -72,13 +82,13 @@ func TestObserveKeepsToolBehaviorWhenSidecarUnavailable(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	url := server.URL
 	server.Close()
-	client, err := NewClient(url, "abcdefghijklmnopqrstuvwxyz012345", nil)
+	client, err := NewClient(Config{SidecarURL: url, AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	toolError := errors.New("provider failed")
 	count := 0
-	_, completed, gotError := client.Observe(context.Background(), sampleCall(), func(context.Context) (json.RawMessage, error) {
+	_, completed, gotError := client.observeRaw(context.Background(), sampleCall(), func(context.Context) (json.RawMessage, error) {
 		count++
 		return nil, toolError
 	})
@@ -98,13 +108,13 @@ func TestObserveDoesNotWaitForSidecar(t *testing.T) {
 	}))
 	defer server.Close()
 	defer close(release)
-	client, err := NewClient(server.URL, "abcdefghijklmnopqrstuvwxyz012345", nil)
+	client, err := NewClient(Config{SidecarURL: server.URL, AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	returned := make(chan struct{})
 	go func() {
-		_, _, _ = client.Observe(context.Background(), sampleCall(), func(context.Context) (json.RawMessage, error) {
+		_, _, _ = client.observeRaw(context.Background(), sampleCall(), func(context.Context) (json.RawMessage, error) {
 			return json.RawMessage(`{"status":"done"}`), nil
 		})
 		close(returned)
@@ -117,7 +127,74 @@ func TestObserveDoesNotWaitForSidecar(t *testing.T) {
 }
 
 func TestClientRejectsRemoteSidecar(t *testing.T) {
-	if _, err := NewClient("https://example.com", "abcdefghijklmnopqrstuvwxyz012345", nil); err == nil {
+	if _, err := NewClient(Config{SidecarURL: "https://example.com", AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"}); err == nil {
 		t.Fatal("remote decision endpoint was accepted")
+	}
+}
+
+func TestTypedObserveKeepsGoValuesAndGeneratesRequestID(t *testing.T) {
+	seenIDs := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			RequestID string `json:"requestId"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		seenIDs <- request.RequestID
+		_ = json.NewEncoder(w).Encode(map[string]any{"requestId": request.RequestID,
+			"mode": "observe", "enforced": false, "coverage": "uncovered", "outcome": "indeterminate"})
+	}))
+	defer server.Close()
+	client, err := NewClient(Config{SidecarURL: server.URL, AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type invoice struct {
+		ID string `json:"id"`
+	}
+	result, completed, toolError := Observe(context.Background(), client,
+		Operation{VersionID: sampleCall().OperationVersionID, ActionKey: "invoice-123",
+			PrincipalID: "staff_123", SessionID: "task_123"},
+		invoice{ID: "inv_123"}, func(context.Context) (invoice, error) {
+			return invoice{ID: "inv_123"}, nil
+		})
+	observed := <-completed
+	seenID := <-seenIDs
+	if toolError != nil || result.ID != "inv_123" || observed.CallError != nil ||
+		observed.ResultError != nil || !uuidPattern.MatchString(seenID) {
+		t.Fatalf("typed Observe failed: result=%+v observed=%+v err=%v request=%s", result, observed, toolError, seenID)
+	}
+}
+
+func TestInvalidObserveSetupStillRunsTool(t *testing.T) {
+	count := 0
+	result, completed, toolError := Observe(context.Background(), (*Client)(nil),
+		Operation{}, struct{}{}, func(context.Context) (int, error) {
+			count++
+			return 42, nil
+		})
+	observed := <-completed
+	if toolError != nil || result != 42 || count != 1 || observed.CallError == nil {
+		t.Fatalf("invalid setup blocked the tool: result=%d observed=%+v err=%v", result, observed, toolError)
+	}
+}
+
+func TestInvalidOperationStillRunsTool(t *testing.T) {
+	client, err := NewClient(Config{SidecarURL: "http://127.0.0.1:7078",
+		AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	result, completed, toolError := Observe(context.Background(), client,
+		Operation{VersionID: "invalid", ActionKey: "invoice-123"},
+		struct{ Amount int }{Amount: 10}, func(context.Context) (int, error) {
+			count++
+			return 42, nil
+		})
+	observed := <-completed
+	if toolError != nil || result != 42 || count != 1 || observed.CallError == nil {
+		t.Fatalf("invalid Operation blocked the tool: result=%d observed=%+v err=%v", result, observed, toolError)
 	}
 }
