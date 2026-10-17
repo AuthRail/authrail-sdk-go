@@ -2,6 +2,7 @@ package authrail
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,13 @@ import (
 	"testing"
 	"time"
 )
+
+func testConfig(url string) Config {
+	return Config{SidecarURL: url, AdapterToken: "abcdefghijklmnopqrstuvwxyz012345",
+		OrganisationID:     "00000000-0000-4000-8000-000000000002",
+		DeploymentID:       "00000000-0000-4000-8000-000000000003",
+		ExecutorPrivateKey: ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))}
+}
 
 func sampleCall() Call {
 	return Call{RequestID: "00000000-0000-4000-8000-000000000009",
@@ -60,7 +68,7 @@ func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 			"mode": "observe", "enforced": false, "coverage": "evaluated", "outcome": outcome})
 	}))
 	defer server.Close()
-	client, err := NewClient(Config{SidecarURL: server.URL, AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"})
+	client, err := NewClient(testConfig(server.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +90,7 @@ func TestObserveKeepsToolBehaviorWhenSidecarUnavailable(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	url := server.URL
 	server.Close()
-	client, err := NewClient(Config{SidecarURL: url, AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"})
+	client, err := NewClient(testConfig(url))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +116,7 @@ func TestObserveDoesNotWaitForSidecar(t *testing.T) {
 	}))
 	defer server.Close()
 	defer close(release)
-	client, err := NewClient(Config{SidecarURL: server.URL, AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"})
+	client, err := NewClient(testConfig(server.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +154,7 @@ func TestTypedObserveKeepsGoValuesAndGeneratesRequestID(t *testing.T) {
 			"mode": "observe", "enforced": false, "coverage": "uncovered", "outcome": "indeterminate"})
 	}))
 	defer server.Close()
-	client, err := NewClient(Config{SidecarURL: server.URL, AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"})
+	client, err := NewClient(testConfig(server.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,8 +189,7 @@ func TestInvalidObserveSetupStillRunsTool(t *testing.T) {
 }
 
 func TestInvalidOperationStillRunsTool(t *testing.T) {
-	client, err := NewClient(Config{SidecarURL: "http://127.0.0.1:7078",
-		AdapterToken: "abcdefghijklmnopqrstuvwxyz012345"})
+	client, err := NewClient(testConfig("http://127.0.0.1:7078"))
 	if err != nil {
 		t.Fatal(err)
 	}

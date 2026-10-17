@@ -3,7 +3,9 @@ package authrail
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,15 +22,21 @@ var keyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
 // Client talks only to a sidecar on the same host. It has no deployment credential.
 type Client struct {
-	endpoint string
-	token    string
-	http     *http.Client
+	endpoint           string
+	token              string
+	http               *http.Client
+	organisationID     string
+	deploymentID       string
+	executorPrivateKey ed25519.PrivateKey
 }
 
 type Config struct {
-	SidecarURL   string
-	AdapterToken string
-	HTTPClient   *http.Client
+	SidecarURL         string
+	AdapterToken       string
+	HTTPClient         *http.Client
+	OrganisationID     string
+	DeploymentID       string
+	ExecutorPrivateKey ed25519.PrivateKey
 }
 
 // Operation identifies the reviewed action and a stable key from the workflow.
@@ -94,6 +102,14 @@ func NewClient(config Config) (*Client, error) {
 	if len(config.AdapterToken) < 32 {
 		return nil, errors.New("adapter token must have at least 32 characters")
 	}
+	if !uuidPattern.MatchString(config.OrganisationID) || !uuidPattern.MatchString(config.DeploymentID) ||
+		len(config.ExecutorPrivateKey) != ed25519.PrivateKeySize {
+		return nil, errors.New("deployment identity and executor signing key are required")
+	}
+	derived := ed25519.NewKeyFromSeed(config.ExecutorPrivateKey.Seed())
+	if subtle.ConstantTimeCompare(derived, config.ExecutorPrivateKey) != 1 {
+		return nil, errors.New("executor signing key is invalid")
+	}
 	transport := config.HTTPClient
 	if transport == nil {
 		transport = &http.Client{}
@@ -103,7 +119,9 @@ func NewClient(config Config) (*Client, error) {
 		copyClient.Timeout = 2 * time.Second
 	}
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{endpoint: strings.TrimRight(config.SidecarURL, "/") + "/evaluate", token: config.AdapterToken, http: &copyClient}, nil
+	return &Client{endpoint: strings.TrimRight(config.SidecarURL, "/") + "/evaluate", token: config.AdapterToken, http: &copyClient,
+		organisationID: config.OrganisationID, deploymentID: config.DeploymentID,
+		executorPrivateKey: append(ed25519.PrivateKey(nil), config.ExecutorPrivateKey...)}, nil
 }
 
 // Observe wraps a function while preserving its Go result and error. The
@@ -207,6 +225,10 @@ func newRequestID() (string, error) {
 }
 
 func (c *Client) evaluate(ctx context.Context, call Call, phase string, result json.RawMessage) (*Decision, error) {
+	proof, err := c.signIdentityProof(call, phase, result)
+	if err != nil {
+		return nil, err
+	}
 	body, err := json.Marshal(struct {
 		FormatVersion      int             `json:"formatVersion"`
 		RequestID          string          `json:"requestId"`
@@ -215,10 +237,11 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase string, result j
 		Arguments          json.RawMessage `json:"arguments"`
 		Result             json.RawMessage `json:"result,omitempty"`
 		Attribution        attribution     `json:"attribution"`
+		IdentityProof      identityProof   `json:"identityProof"`
 	}{FormatVersion: 1, RequestID: call.RequestID, OperationVersionID: call.OperationVersionID,
 		Phase: phase, Arguments: call.Arguments, Result: result,
 		Attribution: attribution{PrincipalID: call.PrincipalID,
-			SessionID: call.SessionID, ResourceID: optionalRef(call.ResourceID)}})
+			SessionID: call.SessionID, ResourceID: optionalRef(call.ResourceID)}, IdentityProof: proof})
 	if err != nil {
 		return nil, err
 	}

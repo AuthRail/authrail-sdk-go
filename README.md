@@ -13,6 +13,9 @@ already use:
 client, err := authrail.NewClient(authrail.Config{
     SidecarURL:   "http://127.0.0.1:7078",
     AdapterToken: os.Getenv("AUTHRAIL_ADAPTER_TOKEN"),
+    OrganisationID: organisationID,
+    DeploymentID: deploymentID,
+    ExecutorPrivateKey: executorPrivateKey,
 })
 if err != nil { return err }
 
@@ -37,7 +40,13 @@ business action a stable `ActionKey` and reuse it on a retry. The SDK creates
 the request ID and JSON for you. Supply opaque principal and task/session IDs;
 use an opaque resource ID when the action targets one. AuthRail records these
 as references supplied by your application, without independently verifying
-the person or resource in Observe mode. Keep the adapter token with the protected
+the person or resource in Observe mode. `ExecutorPrivateKey` is an Ed25519
+private key held by your protected application. Give its PEM public key to the
+sidecar through `AUTHRAIL_EXECUTOR_PUBLIC_KEY_FILE`. The SDK signs each call and
+result check for 30 seconds; the sidecar rejects a changed, expired, or missing
+signature. Derive principal and resource IDs from your application's trusted
+session and resource lookup before calling `Observe`. Keep the signing key and
+adapter token with the protected
 application, away from the agent. The sidecar uses its own separate deployment
 credential to fetch Rails and report covered decisions to AuthRail. A decision's
 `RecordingStatus` is `retained`, `queued`, or `unavailable`. A queued report is
