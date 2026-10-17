@@ -6,6 +6,25 @@ sidecar what the selected Rails would decide about the call and its result.
 
 ## Observe an action
 
+Generate a key pair in the protected application's environment, then register
+`executor-public.pem` on the deployment page:
+
+```bash
+openssl genpkey -algorithm Ed25519 -out executor-private.pem
+openssl pkey -in executor-private.pem -pubout -out executor-public.pem
+```
+
+Store the private key with your other application secrets and give only the
+public key to the sidecar and AuthRail. Load the private key before creating the
+client:
+
+```go
+privateKeyPEM, err := os.ReadFile(os.Getenv("AUTHRAIL_EXECUTOR_PRIVATE_KEY_FILE"))
+if err != nil { return err }
+executorPrivateKey, err := authrail.ParseExecutorPrivateKeyPEM(privateKeyPEM)
+if err != nil { return err }
+```
+
 Set up the client once in the protected application, then wrap the function you
 already use:
 
@@ -52,6 +71,12 @@ credential to fetch Rails and report covered decisions to AuthRail. A decision's
 `RecordingStatus` is `retained`, `queued`, or `unavailable`. A queued report is
 saved by the sidecar for retry, but has no certificate yet. A retained response
 includes its Action and certificate IDs.
+
+Register the matching application public key on the deployment page before
+sending signed reports. AuthRail verifies the signature against that registered
+key when retaining a report, including one retried from the sidecar queue. A
+signed assertion proves that the application key supplied the references; your
+application still authenticates the person and resolves the resource.
 
 **Current scope:** Observe checks Go structs or maps sent to a sidecar on the
 same host. Decisions are advisory. This version does not stop actions or handle
