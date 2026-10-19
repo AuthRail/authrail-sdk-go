@@ -1,5 +1,31 @@
 # AuthRail Go SDK
 
+## Discover a deployment
+
+An AI Inventory manager first creates a short-lived setup key for an integration
+key, AI system name, and deployment name on the AI Inventory page. Keep the key
+in the protected application, not in the agent. The integration key is a lookup
+name, never authentication. An existing AI Inventory item can be linked from
+its detail page instead of creating a second discovered item. Discover once
+during setup:
+
+```go
+found, err := authrail.Discover(ctx, authrail.DiscoveryConfig{
+    ControlPlaneURL: "https://authrail.example.com",
+    SetupKey: os.Getenv("AUTHRAIL_SETUP_KEY"),
+    AgentKey: "support-assistant",
+})
+if err != nil { return err }
+```
+
+The result has the AI Inventory item, revision, and deployment IDs plus its
+confirmation status. Repeating discovery is safe, but an expired or revoked
+key fails. Review and confirm the discovered AI system in AuthRail. Discovery
+does not issue a deployment credential or allow an action; a tenant manager
+sets up the separate sidecar credential and application signing key before
+Observe reports. Keep the setup key out of sidecar configuration and never
+give it to the agent.
+
 Add AuthRail checks at the Go function that performs an AI-requested action.
 Your application still runs the function. The SDK asks the nearby AuthRail
 sidecar what the selected Rails would decide about the call and its result.
@@ -42,8 +68,10 @@ receipt, checks, err := authrail.Observe(ctx, client, authrail.Operation{
     VersionID: refundOperationVersionID,
     ActionKey: refund.ID,
     PrincipalID: currentStaff.ID,
+    PrincipalSource: "application_session",
     SessionID: task.ID,
     ResourceID: refund.InvoiceID,
+    ResourceSource: "application_lookup",
 }, refund, func(ctx context.Context) (Receipt, error) {
     return payments.Refund(ctx, refund)
 })
@@ -64,7 +92,14 @@ private key held by your protected application. Give its PEM public key to the
 sidecar through `AUTHRAIL_EXECUTOR_PUBLIC_KEY_FILE`. The SDK signs each call and
 result check for 30 seconds; the sidecar rejects a changed, expired, or missing
 signature. Derive principal and resource IDs from your application's trusted
-session and resource lookup before calling `Observe`. Keep the signing key and
+session and resource lookup before calling `Observe`. Set `PrincipalSource` to
+`application_session` or `service_identity` based on that authentication. For an
+Operation with a resource identity field, use the exact ID in the reviewed
+argument and set `ResourceSource` to `application_lookup`. Otherwise leave
+`ResourceID` empty and set `ResourceSource` to `not_applicable`. Missing or
+mismatched claims make the local check unavailable, not an allow. These are
+signed application claims, not independent AuthRail verification of a person
+or record. Keep the signing key and
 adapter token with the protected
 application, away from the agent. The sidecar uses its own separate deployment
 credential to fetch Rails and report covered decisions to AuthRail. A decision's

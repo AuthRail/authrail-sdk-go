@@ -57,7 +57,8 @@ func (c *Client) signIdentityProof(call Call, phase string, result json.RawMessa
 		OperationVersionID: call.OperationVersionID, Phase: phase,
 		InputSHA256: hex.EncodeToString(digest[:]),
 		Attribution: attribution{PrincipalID: call.PrincipalID, SessionID: call.SessionID,
-			ResourceID: optionalRef(call.ResourceID)}, IssuedAt: now, ExpiresAt: now + 30}
+			ResourceID: optionalRef(call.ResourceID), PrincipalSource: call.PrincipalSource,
+			ResourceSource: call.ResourceSource}, IssuedAt: now, ExpiresAt: now + 30}
 	message, err := json.Marshal(statement)
 	if err != nil {
 		return identityProof{}, err

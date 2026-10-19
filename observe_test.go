@@ -23,6 +23,7 @@ func sampleCall() Call {
 	return Call{RequestID: "00000000-0000-4000-8000-000000000009",
 		OperationVersionID: "00000000-0000-4000-8000-000000000008",
 		ActionKey:          "invoice-123", PrincipalID: "staff_123", SessionID: "task_123",
+		PrincipalSource: "application_session", ResourceSource: "not_applicable",
 		Arguments: json.RawMessage(`{"amount":101}`)}
 }
 
@@ -41,9 +42,11 @@ func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 			Phase       string          `json:"phase"`
 			Result      json.RawMessage `json:"result"`
 			Attribution struct {
-				PrincipalID string  `json:"principalId"`
-				SessionID   string  `json:"sessionId"`
-				ResourceID  *string `json:"resourceId"`
+				PrincipalID     string  `json:"principalId"`
+				SessionID       string  `json:"sessionId"`
+				ResourceID      *string `json:"resourceId"`
+				PrincipalSource string  `json:"principalSource"`
+				ResourceSource  string  `json:"resourceSource"`
 			} `json:"attribution"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -56,7 +59,9 @@ func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 			t.Errorf("result was not checked: %s", body.Result)
 		}
 		if body.Attribution.PrincipalID != "staff_123" ||
-			body.Attribution.SessionID != "task_123" || body.Attribution.ResourceID != nil {
+			body.Attribution.SessionID != "task_123" || body.Attribution.ResourceID != nil ||
+			body.Attribution.PrincipalSource != "application_session" ||
+			body.Attribution.ResourceSource != "not_applicable" {
 			t.Errorf("adapter attribution was lost: %+v", body.Attribution)
 		}
 		outcome := "deny"

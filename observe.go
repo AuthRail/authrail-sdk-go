@@ -41,11 +41,13 @@ type Config struct {
 
 // Operation identifies the reviewed action and a stable key from the workflow.
 type Operation struct {
-	VersionID   string
-	ActionKey   string
-	PrincipalID string
-	SessionID   string
-	ResourceID  string
+	VersionID       string
+	ActionKey       string
+	PrincipalID     string
+	SessionID       string
+	ResourceID      string
+	PrincipalSource string
+	ResourceSource  string
 }
 
 type Call struct {
@@ -55,13 +57,17 @@ type Call struct {
 	PrincipalID        string
 	SessionID          string
 	ResourceID         string
+	PrincipalSource    string
+	ResourceSource     string
 	Arguments          json.RawMessage
 }
 
 type attribution struct {
-	PrincipalID string  `json:"principalId"`
-	SessionID   string  `json:"sessionId"`
-	ResourceID  *string `json:"resourceId"`
+	PrincipalID     string  `json:"principalId"`
+	SessionID       string  `json:"sessionId"`
+	ResourceID      *string `json:"resourceId"`
+	PrincipalSource string  `json:"principalSource,omitempty"`
+	ResourceSource  string  `json:"resourceSource,omitempty"`
 }
 
 type Decision struct {
@@ -147,7 +153,9 @@ func Observe[Input, Output any](ctx context.Context, client *Client, operation O
 	}
 	call := Call{RequestID: requestID, OperationVersionID: operation.VersionID,
 		ActionKey: operation.ActionKey, PrincipalID: operation.PrincipalID,
-		SessionID: operation.SessionID, ResourceID: operation.ResourceID, Arguments: arguments}
+		SessionID: operation.SessionID, ResourceID: operation.ResourceID,
+		PrincipalSource: operation.PrincipalSource, ResourceSource: operation.ResourceSource,
+		Arguments: arguments}
 	raw, completed, toolError := client.observeRaw(ctx, call, func(ctx context.Context) (json.RawMessage, error) {
 		var err error
 		output, err = execute(ctx)
@@ -241,7 +249,8 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase string, result j
 	}{FormatVersion: 1, RequestID: call.RequestID, OperationVersionID: call.OperationVersionID,
 		Phase: phase, Arguments: call.Arguments, Result: result,
 		Attribution: attribution{PrincipalID: call.PrincipalID,
-			SessionID: call.SessionID, ResourceID: optionalRef(call.ResourceID)}, IdentityProof: proof})
+			SessionID: call.SessionID, ResourceID: optionalRef(call.ResourceID),
+			PrincipalSource: call.PrincipalSource, ResourceSource: call.ResourceSource}, IdentityProof: proof})
 	if err != nil {
 		return nil, err
 	}
