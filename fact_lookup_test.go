@@ -207,6 +207,8 @@ func TestObserveSignatureBindsFactResolution(t *testing.T) {
 		ProviderAccountID: "acct_12345678", Lookup: "invoice.retrieve", LookupKey: "in_1234",
 		AuthenticatedExecutor: true, Status: "ok", ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Value: map[string]any{"status": "paid"}}}
+	call.Trajectory = &TrajectorySnapshot{SessionID: call.SessionID, Complete: true,
+		PriorReadOperationVersionIDs: []string{"00000000-0000-4000-8000-000000000070"}}
 	proof, err := client.signIdentityProof(call, "tool_call", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -217,9 +219,10 @@ func TestObserveSignatureBindsFactResolution(t *testing.T) {
 			t.Fatal("arguments are invalid")
 		}
 		input, err := json.Marshal(struct {
-			Arguments       map[string]any   `json:"arguments"`
-			FactResolutions []FactResolution `json:"factResolutions,omitempty"`
-		}{arguments, value.FactResolutions})
+			Arguments       map[string]any      `json:"arguments"`
+			FactResolutions []FactResolution    `json:"factResolutions,omitempty"`
+			Trajectory      *TrajectorySnapshot `json:"trajectory,omitempty"`
+		}{arguments, value.FactResolutions, value.Trajectory})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -249,5 +252,10 @@ func TestObserveSignatureBindsFactResolution(t *testing.T) {
 	call.FactResolutions[0].ProviderAccountID = "acct_87654321"
 	if valid(call) {
 		t.Fatal("changed fact account passed the signature")
+	}
+	call.FactResolutions[0].ProviderAccountID = "acct_12345678"
+	call.Trajectory.PriorReadOperationVersionIDs = nil
+	if valid(call) {
+		t.Fatal("changed session history passed the signature")
 	}
 }

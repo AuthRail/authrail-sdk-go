@@ -49,6 +49,7 @@ type Operation struct {
 	PrincipalSource string
 	ResourceSource  string
 	FactResolutions []FactResolution
+	Trajectory      *TrajectorySnapshot
 }
 
 type Call struct {
@@ -62,6 +63,7 @@ type Call struct {
 	ResourceSource     string
 	Arguments          json.RawMessage
 	FactResolutions    []FactResolution
+	Trajectory         *TrajectorySnapshot
 }
 
 type attribution struct {
@@ -159,6 +161,7 @@ func Observe[Input, Output any](ctx context.Context, client *Client, operation O
 		SessionID: operation.SessionID, ResourceID: operation.ResourceID,
 		PrincipalSource: operation.PrincipalSource, ResourceSource: operation.ResourceSource,
 		Arguments: arguments, FactResolutions: operation.FactResolutions}
+	call.Trajectory = operation.Trajectory
 	raw, completed, toolError := client.observeRaw(ctx, call, func(ctx context.Context) (json.RawMessage, error) {
 		var err error
 		output, err = execute(ctx)
@@ -241,18 +244,20 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase string, result j
 		return nil, err
 	}
 	body, err := json.Marshal(struct {
-		FormatVersion      int              `json:"formatVersion"`
-		RequestID          string           `json:"requestId"`
-		OperationVersionID string           `json:"operationVersionId"`
-		Phase              string           `json:"phase"`
-		Arguments          json.RawMessage  `json:"arguments"`
-		Result             json.RawMessage  `json:"result,omitempty"`
-		FactResolutions    []FactResolution `json:"factResolutions,omitempty"`
-		Attribution        attribution      `json:"attribution"`
-		IdentityProof      identityProof    `json:"identityProof"`
+		FormatVersion      int                 `json:"formatVersion"`
+		RequestID          string              `json:"requestId"`
+		OperationVersionID string              `json:"operationVersionId"`
+		Phase              string              `json:"phase"`
+		Arguments          json.RawMessage     `json:"arguments"`
+		Result             json.RawMessage     `json:"result,omitempty"`
+		FactResolutions    []FactResolution    `json:"factResolutions,omitempty"`
+		Trajectory         *TrajectorySnapshot `json:"trajectory,omitempty"`
+		Attribution        attribution         `json:"attribution"`
+		IdentityProof      identityProof       `json:"identityProof"`
 	}{FormatVersion: 1, RequestID: call.RequestID, OperationVersionID: call.OperationVersionID,
 		Phase: phase, Arguments: call.Arguments, Result: result,
 		FactResolutions: call.FactResolutions,
+		Trajectory:      call.Trajectory,
 		Attribution: attribution{PrincipalID: call.PrincipalID,
 			SessionID: call.SessionID, ResourceID: optionalRef(call.ResourceID),
 			PrincipalSource: call.PrincipalSource, ResourceSource: call.ResourceSource}, IdentityProof: proof})

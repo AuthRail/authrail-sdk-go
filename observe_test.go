@@ -39,8 +39,9 @@ func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 			return
 		}
 		var body struct {
-			Phase       string          `json:"phase"`
-			Result      json.RawMessage `json:"result"`
+			Phase       string              `json:"phase"`
+			Result      json.RawMessage     `json:"result"`
+			Trajectory  *TrajectorySnapshot `json:"trajectory"`
 			Attribution struct {
 				PrincipalID     string  `json:"principalId"`
 				SessionID       string  `json:"sessionId"`
@@ -64,6 +65,11 @@ func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 			body.Attribution.ResourceSource != "not_applicable" {
 			t.Errorf("adapter attribution was lost: %+v", body.Attribution)
 		}
+		if body.Trajectory == nil || body.Trajectory.SessionID != "task_123" ||
+			!body.Trajectory.Complete || len(body.Trajectory.PriorReadOperationVersionIDs) != 1 ||
+			body.Trajectory.Values["sensitiveDataSeen"] != true {
+			t.Errorf("signed session snapshot was lost at %s: %+v", body.Phase, body.Trajectory)
+		}
 		outcome := "deny"
 		if body.Phase == "tool_result" {
 			outcome = "allow"
@@ -78,7 +84,11 @@ func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 		t.Fatal(err)
 	}
 	executed := 0
-	result, completed, err := client.observeRaw(context.Background(), sampleCall(), func(context.Context) (json.RawMessage, error) {
+	call := sampleCall()
+	call.Trajectory = &TrajectorySnapshot{SessionID: call.SessionID, Complete: true,
+		PriorReadOperationVersionIDs: []string{"00000000-0000-4000-8000-000000000070"},
+		Values:                       map[string]any{"sensitiveDataSeen": true}}
+	result, completed, err := client.observeRaw(context.Background(), call, func(context.Context) (json.RawMessage, error) {
 		executed++
 		return json.RawMessage(`{"status":"done"}`), nil
 	})

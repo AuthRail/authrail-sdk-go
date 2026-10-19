@@ -113,6 +113,34 @@ key when retaining a report, including one retried from the sidecar queue. A
 signed assertion proves that the application key supplied the references; your
 application still authenticates the person and resolves the resource.
 
+## Supply prior session reads
+
+For a Guard rule that checks an earlier read, the protected application may
+attach a `TrajectorySnapshot` to the Operation. Use the authenticated task's
+`SessionID`, and include only exact Operation Version IDs whose **result hook
+completed successfully** earlier in that task. Set `Complete: true` only when
+the application can account for the full relevant history; otherwise omit the
+snapshot or leave it incomplete. A complete empty list means no such reads
+occurred. The source read Operation must also have result-hook coverage in the
+active signed bundle. Never build this list from agent-supplied text.
+
+```go
+operation.Trajectory = &authrail.TrajectorySnapshot{
+    SessionID: operation.SessionID,
+    Complete: true,
+    PriorReadOperationVersionIDs: completedReadVersionIDs,
+}
+```
+
+The SDK signs this bounded snapshot with each hook. The sidecar checks its
+session and exact versions before evaluating a reviewed prior-read rule; a
+missing or incomplete snapshot leaves that rule unresolved. The snapshot is an
+application assertion, not independent proof that every earlier read was
+observed. `Values` may also carry small, typed session fields already reviewed
+on the exact Operation; unreviewed or wrongly typed fields are rejected. Do
+not put arbitrary conversation text or model output in `Values`. Raw session
+history and values are not sent to AuthRail.
+
 ## Read a live fact in your protected application
 
 `LookupStripeInvoiceStatus` supports a normal Stripe account by default. It
