@@ -113,6 +113,66 @@ key when retaining a report, including one retried from the sidecar queue. A
 signed assertion proves that the application key supplied the references; your
 application still authenticates the person and resolves the resource.
 
+## Read a live fact in your protected application
+
+`LookupStripeInvoiceStatus` supports a normal Stripe account by default. It
+first reads Stripe's current account with the application's credential and
+requires its ID to match the reviewed account, then reads the invoice. Set
+`ConnectedAccount: true` only for Stripe Connect: the invoice request then
+sends the reviewed connected account ID in `Stripe-Account`. Both paths reject
+redirects and a returned invoice with a different ID, and return `unavailable`
+on timeout or provider failure. A mismatched account is `untrusted`. Never
+give the Stripe credential to the agent.
+
+`LookupCustomerFact` calls your named, read-only lookup with a bounded context.
+Your callback must honor cancellation, keep its database or API credential in
+the protected application, return the exact source, lookup, and account or
+tenant it read, and return the source observation time. The helper rejects a
+different source or account;
+it does not turn a cached result into a fresh one. Both helpers return the
+source version, lookup key, account, observation time, and bounded value for
+the local decision protocol. Configure them from the **exact reviewed Context
+Source Version**, not a copied endpoint or an agent-provided account ID.
+
+For example, read a Stripe invoice before the protected action and attach the
+resolution to that action's `Operation`:
+
+```go
+fact, err := authrail.LookupStripeInvoiceStatus(ctx, authrail.StripeInvoiceSource{
+    SourceVersionID: reviewedSourceVersionID,
+    ProviderAccountID: reviewedStripeAccountID,
+    Timeout: time.Duration(reviewedTimeoutMs) * time.Millisecond,
+    SecretKey: stripeSecretHeldByApplication,
+}, refund.InvoiceID)
+if err != nil { return err }
+operation.FactResolutions = []authrail.FactResolution{fact}
+```
+
+The action arguments must contain the invoice ID in the exact field reviewed
+for that source. A provider outage returns an `unavailable` fact, not a guessed
+status. A configuration error is returned separately and must be handled by the
+protected application.
+
+For a customer API, `NewCustomerAPIReader` supplies a concrete HTTPS read-only
+callback. Configure its fixed collection endpoint and bearer credential in the
+protected application. It performs one `GET` for the record key, does not follow
+redirects, and accepts only a bounded JSON response shaped as
+`{"accountId":"tenant_123","recordId":"invoice_123","observedAt":"...","data":{...}}`.
+`LookupCustomerFact` compares the returned account, record key, source name,
+and lookup with the reviewed source before the sidecar checks the projected
+fact and its freshness. Other customer-owned sources can implement the same
+`CustomerRead` callback contract without placing credentials in AuthRail.
+
+Pass the returned resolution in `Operation.FactResolutions` when calling
+`Observe`. The SDK signs it together with the action input. The sidecar checks
+the exact published Data Rail's source version, account, lookup, record key,
+value type, and freshness before a Policy Rail may read the fact. Missing,
+stale, mismatched, and unavailable facts cannot satisfy the rule. AuthRail
+retains only the reported fact status and source/lookup provenance in the
+Observe certificate, not the fact value or record key. A successful read is
+context, not authorization of the requested business action, and Observe still
+does not stop the action.
+
 **Current scope:** Observe checks Go structs or maps sent to a sidecar on the
 same host. Decisions are advisory. This version does not stop actions or handle
 approvals. AuthRail retains covered reports when reachable; a missing report

@@ -48,6 +48,7 @@ type Operation struct {
 	ResourceID      string
 	PrincipalSource string
 	ResourceSource  string
+	FactResolutions []FactResolution
 }
 
 type Call struct {
@@ -60,6 +61,7 @@ type Call struct {
 	PrincipalSource    string
 	ResourceSource     string
 	Arguments          json.RawMessage
+	FactResolutions    []FactResolution
 }
 
 type attribution struct {
@@ -71,19 +73,20 @@ type attribution struct {
 }
 
 type Decision struct {
-	RequestID       string   `json:"requestId"`
-	Mode            string   `json:"mode"`
-	Enforced        bool     `json:"enforced"`
-	Coverage        string   `json:"coverage"`
-	Outcome         string   `json:"outcome"`
-	Sequence        int64    `json:"sequence"`
-	BundleID        *string  `json:"bundleId"`
-	RailVersionIDs  []string `json:"railVersionIds"`
-	MatchedRuleIDs  []string `json:"matchedRuleIds"`
-	ReasonCodes     []string `json:"reasonCodes"`
-	RecordingStatus string   `json:"recordingStatus"`
-	ActionID        string   `json:"actionId"`
-	CertificateID   string   `json:"certificateId"`
+	RequestID       string        `json:"requestId"`
+	Mode            string        `json:"mode"`
+	Enforced        bool          `json:"enforced"`
+	Coverage        string        `json:"coverage"`
+	Outcome         string        `json:"outcome"`
+	Sequence        int64         `json:"sequence"`
+	BundleID        *string       `json:"bundleId"`
+	RailVersionIDs  []string      `json:"railVersionIds"`
+	MatchedRuleIDs  []string      `json:"matchedRuleIds"`
+	ReasonCodes     []string      `json:"reasonCodes"`
+	Facts           []FactSummary `json:"facts,omitempty"`
+	RecordingStatus string        `json:"recordingStatus"`
+	ActionID        string        `json:"actionId"`
+	CertificateID   string        `json:"certificateId"`
 	Unresolved      []struct {
 		Root   string   `json:"root"`
 		Path   []string `json:"path"`
@@ -155,7 +158,7 @@ func Observe[Input, Output any](ctx context.Context, client *Client, operation O
 		ActionKey: operation.ActionKey, PrincipalID: operation.PrincipalID,
 		SessionID: operation.SessionID, ResourceID: operation.ResourceID,
 		PrincipalSource: operation.PrincipalSource, ResourceSource: operation.ResourceSource,
-		Arguments: arguments}
+		Arguments: arguments, FactResolutions: operation.FactResolutions}
 	raw, completed, toolError := client.observeRaw(ctx, call, func(ctx context.Context) (json.RawMessage, error) {
 		var err error
 		output, err = execute(ctx)
@@ -238,16 +241,18 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase string, result j
 		return nil, err
 	}
 	body, err := json.Marshal(struct {
-		FormatVersion      int             `json:"formatVersion"`
-		RequestID          string          `json:"requestId"`
-		OperationVersionID string          `json:"operationVersionId"`
-		Phase              string          `json:"phase"`
-		Arguments          json.RawMessage `json:"arguments"`
-		Result             json.RawMessage `json:"result,omitempty"`
-		Attribution        attribution     `json:"attribution"`
-		IdentityProof      identityProof   `json:"identityProof"`
+		FormatVersion      int              `json:"formatVersion"`
+		RequestID          string           `json:"requestId"`
+		OperationVersionID string           `json:"operationVersionId"`
+		Phase              string           `json:"phase"`
+		Arguments          json.RawMessage  `json:"arguments"`
+		Result             json.RawMessage  `json:"result,omitempty"`
+		FactResolutions    []FactResolution `json:"factResolutions,omitempty"`
+		Attribution        attribution      `json:"attribution"`
+		IdentityProof      identityProof    `json:"identityProof"`
 	}{FormatVersion: 1, RequestID: call.RequestID, OperationVersionID: call.OperationVersionID,
 		Phase: phase, Arguments: call.Arguments, Result: result,
+		FactResolutions: call.FactResolutions,
 		Attribution: attribution{PrincipalID: call.PrincipalID,
 			SessionID: call.SessionID, ResourceID: optionalRef(call.ResourceID),
 			PrincipalSource: call.PrincipalSource, ResourceSource: call.ResourceSource}, IdentityProof: proof})

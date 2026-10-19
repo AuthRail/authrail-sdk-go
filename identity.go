@@ -36,9 +36,10 @@ func (c *Client) signIdentityProof(call Call, phase string, result json.RawMessa
 		return identityProof{}, errors.New("Observe arguments are invalid")
 	}
 	input := struct {
-		Arguments map[string]any `json:"arguments"`
-		Result    map[string]any `json:"result,omitempty"`
-	}{Arguments: args}
+		Arguments       map[string]any   `json:"arguments"`
+		Result          map[string]any   `json:"result,omitempty"`
+		FactResolutions []FactResolution `json:"factResolutions,omitempty"`
+	}{Arguments: args, FactResolutions: call.FactResolutions}
 	if phase == "tool_result" {
 		if json.Unmarshal(result, &input.Result) != nil || input.Result == nil {
 			return identityProof{}, errors.New("Observe result is invalid")
