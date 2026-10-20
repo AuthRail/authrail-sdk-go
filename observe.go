@@ -209,15 +209,18 @@ func (c *Client) observeRaw(ctx context.Context, call Call,
 	observation := make(chan Observation, 1)
 	checkContext := context.WithoutCancel(ctx)
 	callCheck := make(chan Observation, 1)
+	callDone := make(chan struct{})
 	go func() {
 		decision, err := c.evaluate(checkContext, call, "tool_call", nil)
 		callCheck <- Observation{CallDecision: decision, CallError: err}
+		close(callDone)
 	}()
 	result, toolError := execute(ctx)
 	resultCheck := make(chan Observation, 1)
 	if toolError == nil {
 		if jsonObject(result) {
 			go func() {
+				<-callDone
 				decision, err := c.evaluate(checkContext, call, "tool_result", result)
 				resultCheck <- Observation{ResultDecision: decision, ResultError: err}
 			}()

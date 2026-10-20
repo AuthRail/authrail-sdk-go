@@ -120,24 +120,32 @@ attach a `TrajectorySnapshot` to the Operation. Use the authenticated task's
 `SessionID`, and include only exact Operation Version IDs whose **result hook
 completed successfully** earlier in that task. Set `Complete: true` only when
 the application can account for the full relevant history; otherwise omit the
-snapshot or leave it incomplete. A complete empty list means no such reads
-occurred. The source read Operation must also have result-hook coverage in the
-active signed bundle. Never build this list from agent-supplied text.
+snapshot or leave it incomplete. On the first checked call for a new task,
+set `Start: true` with a complete empty list. Its result hook carries the same
+start snapshot. Keep the same session ID on subsequent actions, with
+`Start: false` and the full ordered list of unique earlier covered read
+Operation Versions. The source read Operation must have call and
+result coverage in the active signed bundle. Never build this list from
+agent-supplied text.
 
 ```go
 operation.Trajectory = &authrail.TrajectorySnapshot{
     SessionID: operation.SessionID,
+    Start: true,
     Complete: true,
-    PriorReadOperationVersionIDs: completedReadVersionIDs,
+    PriorReadOperationVersionIDs: []string{},
 }
 ```
 
-The SDK signs this bounded snapshot with each hook. The sidecar checks its
-session and exact versions before evaluating a reviewed prior-read rule; a
-missing or incomplete snapshot leaves that rule unresolved. The snapshot is an
-application assertion, not independent proof that every earlier read was
-observed. The SDK freezes the supplied context before asynchronous checks so
-later application mutations cannot change what was signed. `Values` may also
+The SDK signs this bounded snapshot with each hook and sends the result check
+after the call check completes, without delaying the tool function. The sidecar
+keeps a private, bounded history of matching signed call and successful result
+hooks and checks exact ordered versions for the same principal and session.
+A missing, changed, incomplete, or unrecoverable history leaves the local check
+unavailable, not allowed. The application assertion is still not independent
+proof that every earlier read was intercepted: a bypassed hook is invisible.
+The SDK freezes the supplied context before asynchronous checks so later
+application mutations cannot change what was signed. `Values` may also
 carry small, typed session fields already reviewed
 on the exact Operation; unreviewed or wrongly typed fields are rejected. Do
 not put arbitrary conversation text or model output in `Values`. Raw session

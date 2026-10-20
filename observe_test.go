@@ -101,6 +101,55 @@ func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestObserveSendsResultAfterCallCheck(t *testing.T) {
+	callStarted := make(chan struct{})
+	releaseCall := make(chan struct{})
+	resultStarted := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Phase string `json:"phase"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body.Phase == "tool_call" {
+			close(callStarted)
+			<-releaseCall
+		} else {
+			resultStarted <- struct{}{}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"requestId": sampleCall().RequestID,
+			"mode": "observe", "enforced": false, "coverage": "evaluated", "outcome": "allow"})
+	}))
+	defer server.Close()
+	client, err := NewClient(testConfig(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, completed, toolError := client.observeRaw(context.Background(), sampleCall(),
+		func(context.Context) (json.RawMessage, error) {
+			return json.RawMessage(`{"status":"done"}`), nil
+		})
+	if toolError != nil || string(result) != `{"status":"done"}` {
+		t.Fatalf("tool execution changed: %s %v", result, toolError)
+	}
+	<-callStarted
+	select {
+	case <-resultStarted:
+		t.Fatal("result check arrived before call check completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseCall)
+	if observed := <-completed; observed.CallError != nil || observed.ResultError != nil {
+		t.Fatalf("ordered checks failed: %+v", observed)
+	}
+	select {
+	case <-resultStarted:
+	default:
+		t.Fatal("result hook never arrived")
+	}
+}
+
 func TestObserveKeepsToolBehaviorWhenSidecarUnavailable(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	url := server.URL
