@@ -148,7 +148,9 @@ The SDK freezes the supplied context before asynchronous checks so later
 application mutations cannot change what was signed. `Values` may also
 carry small, typed session fields already reviewed
 on the exact Operation; unreviewed or wrongly typed fields are rejected. Do
-not put arbitrary conversation text or model output in `Values`. Raw session
+not put arbitrary conversation text or model output in `Values`. Do not use
+session fields to claim a prior business effect: a successful tool result
+check is not an authenticated execution receipt. Raw session
 history and values are not sent to AuthRail.
 
 ## Read a live fact in your protected application
