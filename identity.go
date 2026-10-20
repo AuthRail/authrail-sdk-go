@@ -30,6 +30,8 @@ type identityStatement struct {
 	ExpiresAt          int64       `json:"expiresAt"`
 }
 
+// signIdentityProof binds the phase, canonical input digest, and application
+// identity claims to one deployment and action; it does not verify those claims.
 func (c *Client) signIdentityProof(call Call, phase string, result json.RawMessage) (identityProof, error) {
 	var args map[string]any
 	if json.Unmarshal(call.Arguments, &args) != nil || args == nil {

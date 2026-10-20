@@ -30,6 +30,8 @@ type Client struct {
 	executorPrivateKey ed25519.PrivateKey
 }
 
+// Config binds one protected application to its local sidecar and signing key.
+// The sidecar, not this client, holds the AuthRail deployment credential.
 type Config struct {
 	SidecarURL         string
 	AdapterToken       string
@@ -52,6 +54,7 @@ type Operation struct {
 	Trajectory      *TrajectorySnapshot
 }
 
+// Call carries one authenticated application assertion for an exact action phase.
 type Call struct {
 	RequestID          string
 	OperationVersionID string
@@ -74,6 +77,7 @@ type attribution struct {
 	ResourceSource  string  `json:"resourceSource,omitempty"`
 }
 
+// Decision is advisory in Observe mode; RecordingStatus does not prove execution.
 type Decision struct {
 	RequestID       string        `json:"requestId"`
 	Mode            string        `json:"mode"`
@@ -97,6 +101,7 @@ type Decision struct {
 }
 
 // Observation reports both decision checks. Errors are coverage gaps, not tool errors.
+// Observation keeps call and result checks separate from the tool's own error.
 type Observation struct {
 	CallDecision   *Decision
 	ResultDecision *Decision
@@ -104,6 +109,8 @@ type Observation struct {
 	ResultError    error
 }
 
+// NewClient accepts only loopback HTTP and caps check latency so local decisions
+// cannot redirect or indefinitely delay the protected application.
 func NewClient(config Config) (*Client, error) {
 	u, err := url.Parse(config.SidecarURL)
 	if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||

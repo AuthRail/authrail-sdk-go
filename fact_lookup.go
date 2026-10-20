@@ -16,6 +16,8 @@ var stripeInvoicePattern = regexp.MustCompile(`^in_[A-Za-z0-9]{4,100}$`)
 var sourceNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.:-]{2,159}$`)
 var accountBoundaryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$`)
 
+// FactResolution is a signed source observation for Data Rails, never permission
+// to execute the business action.
 type FactResolution struct {
 	SourceVersionID       string                `json:"sourceVersionId"`
 	ProviderAccountID     string                `json:"providerAccountId,omitempty"`
@@ -63,6 +65,8 @@ type StripeInvoiceSource struct {
 	HTTPClient        *http.Client
 }
 
+// LookupStripeInvoiceStatus checks the reviewed account before reading one
+// invoice; provider failures return unavailable context, not a guessed value.
 func LookupStripeInvoiceStatus(ctx context.Context, source StripeInvoiceSource, invoiceID string) (FactResolution, error) {
 	if !uuidPattern.MatchString(source.SourceVersionID) || !stripeAccountPattern.MatchString(source.ProviderAccountID) ||
 		!stripeInvoicePattern.MatchString(invoiceID) || source.Timeout < 100*time.Millisecond ||
@@ -185,6 +189,8 @@ type CustomerReadResult struct {
 
 type CustomerRead func(context.Context, string) (CustomerReadResult, error)
 
+// LookupCustomerFact accepts only a matching protected source and account;
+// callers must keep lookup credentials outside the agent.
 func LookupCustomerFact(ctx context.Context, source CustomerSource, lookupKey string,
 	read CustomerRead) (FactResolution, error) {
 	if !uuidPattern.MatchString(source.SourceVersionID) || !sourceNamePattern.MatchString(source.SourceIdentity) ||

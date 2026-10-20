@@ -43,6 +43,8 @@ type ExtractionResult struct {
 
 type Extractor func(context.Context, []byte) (ExtractionResult, error)
 
+// ExtractContextFact validates one bounded AI-assisted value against the
+// reviewed source and records uncertainty; the model never decides access.
 func ExtractContextFact(ctx context.Context, source ExtractionSource, lookupKey string,
 	sourceLocation string, observedAt time.Time, document []byte, extractor Extractor) (FactResolution, error) {
 	if !uuidPattern.MatchString(source.SourceVersionID) || !sourceNamePattern.MatchString(source.SourceIdentity) ||

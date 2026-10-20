@@ -1,4 +1,45 @@
+<p align="center">
+  <img src="assets/authrail-logo.png" alt="AuthRail" width="120" />
+</p>
+
 # AuthRail Go SDK
+
+The AuthRail Go SDK is an adapter for checking AI-requested actions in a
+protected Go application. Put its checks at the function that handles each
+action. Your application keeps the tool, provider credentials, and business
+workflow. The SDK asks a sidecar on the same host what the active Rails would
+decide, then returns the function's own result separately from the check.
+
+**Observe checks are advisory.** A would-deny decision, missing sidecar, or
+recording failure does not stop the function. A decision is not proof of
+execution or universal interception.
+
+## Install and prepare
+
+Go 1.26 or newer is required.
+
+```bash
+go get github.com/AuthRail/authrail-sdk-go
+```
+
+Before adding a check:
+
+1. Review the action and its exact Operation Version in AuthRail.
+2. Register an Observe deployment and start its customer-side sidecar with a
+   deployment credential, private durable state, and separate adapter token.
+   Follow the [sidecar setup guide](https://github.com/AuthRail/authrail-sidecar#readme);
+   the SDK cannot evaluate Rails or deliver reports without it.
+3. Register the protected application's Ed25519 public key on that deployment.
+   Keep the private key and provider credentials outside the agent.
+4. Derive the principal, session, and optional resource ID from your
+   application's authenticated context, not from model text.
+
+Start with [Observe an action](#observe-an-action). Use
+[Discover a deployment](#discover-a-deployment) only when onboarding an AI
+system through a tenant-issued setup key. The later sections show how to add
+trusted session history, live source reads, and bounded AI-assisted facts.
+For a Node.js application, use the
+[Node SDK](https://github.com/AuthRail/authrail-sdk-node) with the same sidecar.
 
 ## Discover a deployment
 
@@ -235,8 +276,3 @@ checks it again against the published source. The model never returns an
 authorization decision. AuthRail records bounded provenance and status, not
 the document or extracted value. A matching model claim is not independent
 proof that the model read the document or interpreted it correctly.
-
-**Current scope:** Observe checks Go structs or maps sent to a sidecar on the
-same host. Decisions are advisory. This version does not stop actions or handle
-approvals. AuthRail retains covered reports when reachable; a missing report
-remains visible as a recording gap.

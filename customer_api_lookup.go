@@ -24,6 +24,8 @@ type CustomerAPIConfig struct {
 	HTTPClient      *http.Client
 }
 
+// NewCustomerAPIReader creates a fixed HTTPS read-only lookup and rejects
+// redirects so a provider credential cannot follow an unreviewed endpoint.
 func NewCustomerAPIReader(config CustomerAPIConfig) (CustomerRead, error) {
 	endpoint, err := url.Parse(config.Endpoint)
 	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil ||
