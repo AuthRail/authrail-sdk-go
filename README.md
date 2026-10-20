@@ -136,7 +136,9 @@ The SDK signs this bounded snapshot with each hook. The sidecar checks its
 session and exact versions before evaluating a reviewed prior-read rule; a
 missing or incomplete snapshot leaves that rule unresolved. The snapshot is an
 application assertion, not independent proof that every earlier read was
-observed. `Values` may also carry small, typed session fields already reviewed
+observed. The SDK freezes the supplied context before asynchronous checks so
+later application mutations cannot change what was signed. `Values` may also
+carry small, typed session fields already reviewed
 on the exact Operation; unreviewed or wrongly typed fields are rejected. Do
 not put arbitrary conversation text or model output in `Values`. Raw session
 history and values are not sent to AuthRail.

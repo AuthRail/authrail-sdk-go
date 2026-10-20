@@ -196,6 +196,16 @@ func (c *Client) observeRaw(ctx context.Context, call Call,
 		close(completed)
 		return result, completed, toolError
 	}
+	frozenCall, freezeError := freezeObserveCall(call)
+	if freezeError != nil {
+		result, toolError := execute(ctx)
+		completed := make(chan Observation, 1)
+		completed <- Observation{CallError: errors.New("Observe context is invalid"),
+			ResultError: errors.New("Observe context is invalid")}
+		close(completed)
+		return result, completed, toolError
+	}
+	call = frozenCall
 	observation := make(chan Observation, 1)
 	checkContext := context.WithoutCancel(ctx)
 	callCheck := make(chan Observation, 1)
@@ -226,6 +236,20 @@ func (c *Client) observeRaw(ctx context.Context, call Call,
 		close(observation)
 	}()
 	return result, observation, toolError
+}
+
+func freezeObserveCall(call Call) (Call, error) {
+	encoded, err := json.Marshal(call)
+	if err != nil || len(encoded) > 128*1024 {
+		return Call{}, errors.New("Observe context is invalid")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var frozen Call
+	if err := decoder.Decode(&frozen); err != nil {
+		return Call{}, errors.New("Observe context is invalid")
+	}
+	return frozen, nil
 }
 
 func newRequestID() (string, error) {

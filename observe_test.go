@@ -122,6 +122,30 @@ func TestObserveKeepsToolBehaviorWhenSidecarUnavailable(t *testing.T) {
 	}
 }
 
+func TestObserveFreezesSignedContextBeforeAsyncChecks(t *testing.T) {
+	call := sampleCall()
+	call.Arguments = json.RawMessage(`{"amount":50}`)
+	call.Trajectory = &TrajectorySnapshot{SessionID: call.SessionID, Complete: true,
+		PriorReadOperationVersionIDs: []string{"00000000-0000-4000-8000-000000000070"},
+		Values:                       map[string]any{"history": map[string]any{"sensitive": true}}}
+	call.FactResolutions = []FactResolution{{SourceVersionID: "00000000-0000-4000-8000-000000000030",
+		Value: map[string]any{"status": "paid"}}}
+	frozen, err := freezeObserveCall(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call.Arguments[10] = '9'
+	call.Trajectory.PriorReadOperationVersionIDs[0] = "00000000-0000-4000-8000-000000000071"
+	call.Trajectory.Values["history"].(map[string]any)["sensitive"] = false
+	call.FactResolutions[0].Value["status"] = "void"
+	if string(frozen.Arguments) != `{"amount":50}` ||
+		frozen.Trajectory.PriorReadOperationVersionIDs[0] != "00000000-0000-4000-8000-000000000070" ||
+		frozen.Trajectory.Values["history"].(map[string]any)["sensitive"] != true ||
+		frozen.FactResolutions[0].Value["status"] != "paid" {
+		t.Fatalf("asynchronous context was not frozen: %+v", frozen)
+	}
+}
+
 func TestObserveDoesNotWaitForSidecar(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
