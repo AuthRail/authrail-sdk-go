@@ -14,6 +14,12 @@ decide, then returns the function's own result separately from the check.
 recording failure does not stop the function. A decision is not proof of
 execution or universal interception.
 
+This Go package is currently Observe-only. Its `Observe` wrapper continues
+the function even if the deployment is switched to Enforce. Do not count this
+wrapper as an Enforce boundary or switch a deployment that still relies on it;
+use a tested protected adapter with call and result blocking until Go Enforce
+support is delivered.
+
 ## Install and prepare
 
 Go 1.26 or newer is required.
