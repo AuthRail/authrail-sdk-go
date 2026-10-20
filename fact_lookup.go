@@ -17,16 +17,27 @@ var sourceNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.:-]{2,159}$`)
 var accountBoundaryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$`)
 
 type FactResolution struct {
-	SourceVersionID       string         `json:"sourceVersionId"`
-	ProviderAccountID     string         `json:"providerAccountId,omitempty"`
-	SourceIdentity        string         `json:"sourceIdentity,omitempty"`
-	AccountBoundary       string         `json:"accountBoundary,omitempty"`
-	Lookup                string         `json:"lookup"`
-	LookupKey             string         `json:"lookupKey"`
-	AuthenticatedExecutor bool           `json:"authenticatedExecutor"`
-	Status                string         `json:"status"`
-	ObservedAt            string         `json:"observedAt,omitempty"`
-	Value                 map[string]any `json:"value,omitempty"`
+	SourceVersionID       string                `json:"sourceVersionId"`
+	ProviderAccountID     string                `json:"providerAccountId,omitempty"`
+	SourceIdentity        string                `json:"sourceIdentity,omitempty"`
+	AccountBoundary       string                `json:"accountBoundary,omitempty"`
+	Lookup                string                `json:"lookup"`
+	LookupKey             string                `json:"lookupKey"`
+	AuthenticatedExecutor bool                  `json:"authenticatedExecutor"`
+	Status                string                `json:"status"`
+	ObservedAt            string                `json:"observedAt,omitempty"`
+	Value                 map[string]any        `json:"value,omitempty"`
+	Extraction            *ExtractionProvenance `json:"extraction,omitempty"`
+}
+
+type ExtractionProvenance struct {
+	SourceSHA256      string `json:"sourceSha256"`
+	SourceBytes       int    `json:"sourceBytes"`
+	SourceLocation    string `json:"sourceLocation"`
+	ModelID           string `json:"modelId"`
+	ModelConfigSHA256 string `json:"modelConfigSha256"`
+	PromptVersion     string `json:"promptVersion"`
+	ExtractedAt       string `json:"extractedAt"`
 }
 
 type FactSummary struct {
@@ -38,6 +49,7 @@ type FactSummary struct {
 	Lookup            string  `json:"lookup"`
 	LookupKeySHA256   string  `json:"lookupKeySha256,omitempty"`
 	Status            string  `json:"status"`
+	Uncertainty       string  `json:"uncertainty,omitempty"`
 	ObservedAt        string  `json:"observedAt,omitempty"`
 	AgeSeconds        float64 `json:"ageSeconds,omitempty"`
 }

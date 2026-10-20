@@ -211,6 +211,29 @@ Observe certificate, not the fact value or record key. A successful read is
 context, not authorization of the requested business action, and Observe still
 does not stop the action.
 
+## Read a bounded AI-assisted fact
+
+Review an **AI-assisted reading** information source in AuthRail first. Pin its
+document source and account, one typed result field, exact model and settings
+fingerprint, reading-instructions version, size limits, freshness, and timeout.
+In the protected application, call `ExtractContextFact` with that exact source
+version, authenticated document bytes, an opaque source location, observation
+time, and a callback that invokes your configured model. The callback must
+honor its context deadline and return a single JSON primitive of the reviewed
+type. It must report the model, settings, and instructions actually used, plus
+whether the reading is uncertain. Keep model credentials and raw documents out
+of the agent and sidecar.
+
+The helper hashes the bounded document, checks the callback's version claims,
+type and output size, and constructs the reviewed result field. It returns an
+`unavailable` resolution on timeout, `uncertain` when the callback cannot make
+a reliable assertion, or `untrusted` for mismatched or malformed output. Pass
+that resolution in `Operation.FactResolutions`; the signed sidecar protocol
+checks it again against the published source. The model never returns an
+authorization decision. AuthRail records bounded provenance and status, not
+the document or extracted value. A matching model claim is not independent
+proof that the model read the document or interpreted it correctly.
+
 **Current scope:** Observe checks Go structs or maps sent to a sidecar on the
 same host. Decisions are advisory. This version does not stop actions or handle
 approvals. AuthRail retains covered reports when reachable; a missing report
