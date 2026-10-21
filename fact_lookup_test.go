@@ -94,19 +94,45 @@ func stripeResponse(status int, body string) *http.Response {
 }
 
 func TestStripeInvoiceLookupPinsAccountAndInvoice(t *testing.T) {
+	calls := 0
 	source := stripeSource(func(request *http.Request) (*http.Response, error) {
+		calls++
 		secret, _, authenticated := request.BasicAuth()
-		if request.Method != http.MethodGet || request.URL.String() != "https://api.stripe.com/v1/invoices/in_1234" ||
+		if request.Method != http.MethodGet ||
 			request.Header.Get("Stripe-Account") != "acct_12345678" || !authenticated || secret != "sk_test_private" {
 			t.Errorf("wrong provider lookup boundary: %s %s", request.Method, request.URL)
+		}
+		if calls == 1 {
+			if request.URL.String() != "https://api.stripe.com/v1/account" {
+				t.Fatalf("connected account was not verified: %s", request.URL)
+			}
+			return stripeResponse(http.StatusOK, `{"id":"acct_12345678","object":"account"}`), nil
+		}
+		if request.URL.String() != "https://api.stripe.com/v1/invoices/in_1234" || calls != 2 {
+			t.Fatalf("unexpected invoice request: %s", request.URL)
 		}
 		return stripeResponse(http.StatusOK, `{"id":"in_1234","object":"invoice","status":"paid"}`), nil
 	})
 	resolution, err := LookupStripeInvoiceStatus(context.Background(), source, "in_1234")
 	if err != nil || resolution.Status != "ok" || resolution.Value["status"] != "paid" ||
 		resolution.Lookup != "invoice.retrieve" || resolution.LookupKey != "in_1234" ||
-		resolution.ProviderAccountID != "acct_12345678" || resolution.ObservedAt == "" {
+		resolution.ProviderAccountID != "acct_12345678" || resolution.ObservedAt == "" || calls != 2 {
 		t.Fatalf("incorrect invoice fact: %+v, %v", resolution, err)
+	}
+}
+
+func TestStripeConnectedAccountMismatchNeverReadsInvoice(t *testing.T) {
+	calls := 0
+	source := stripeSource(func(request *http.Request) (*http.Response, error) {
+		calls++
+		if request.URL.Path != "/v1/account" || request.Header.Get("Stripe-Account") != "acct_12345678" {
+			t.Fatal("invoice read before verifying connected account")
+		}
+		return stripeResponse(http.StatusOK, `{"id":"acct_87654321","object":"account"}`), nil
+	})
+	resolution, err := LookupStripeInvoiceStatus(context.Background(), source, "in_1234")
+	if err != nil || resolution.Status != "untrusted" || calls != 1 {
+		t.Fatalf("wrong connected account was trusted: %+v %v; calls=%d", resolution, err, calls)
 	}
 }
 
@@ -123,15 +149,18 @@ func TestStripeInvoiceLookupDoesNotTrustMismatchOrRedirect(t *testing.T) {
 		{"redirect", http.StatusFound, `{}`, "unavailable"}} {
 		t.Run(scenario.name, func(t *testing.T) {
 			calls := 0
-			source := stripeSource(func(*http.Request) (*http.Response, error) {
+			source := stripeSource(func(request *http.Request) (*http.Response, error) {
 				calls++
+				if request.URL.Path == "/v1/account" {
+					return stripeResponse(http.StatusOK, `{"id":"acct_12345678","object":"account"}`), nil
+				}
 				response := stripeResponse(scenario.status, scenario.body)
 				response.Header = make(http.Header)
 				response.Header.Set("Location", "https://elsewhere.example/invoice")
 				return response, nil
 			})
 			resolution, err := LookupStripeInvoiceStatus(context.Background(), source, "in_1234")
-			if err != nil || resolution.Status != scenario.expected || resolution.Value != nil || calls != 1 {
+			if err != nil || resolution.Status != scenario.expected || resolution.Value != nil || calls != 2 {
 				t.Fatalf("unsafe provider fact: %+v, %v; calls=%d", resolution, err, calls)
 			}
 		})

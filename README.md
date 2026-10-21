@@ -255,11 +255,24 @@ history and values are not sent to AuthRail.
 `LookupStripeInvoiceStatus` supports a normal Stripe account by default. It
 first reads Stripe's current account with the application's credential and
 requires its ID to match the reviewed account, then reads the invoice. Set
-`ConnectedAccount: true` only for Stripe Connect: the invoice request then
-sends the reviewed connected account ID in `Stripe-Account`. Both paths reject
+`ConnectedAccount: true` only for Stripe Connect: the account and invoice
+requests then send the reviewed connected account ID in `Stripe-Account`. Both paths reject
 redirects and a returned invoice with a different ID, and return `unavailable`
 on timeout or provider failure. A mismatched account is `untrusted`. Never
 give the Stripe credential to the agent.
+
+`LookupQuickBooksInvoiceBalance` reads one invoice from the reviewed
+QuickBooks Online realm with an application-owned OAuth access token. Set
+`Sandbox: true` only for an Intuit test company; otherwise it uses the fixed
+production host. The bounded result has `Invoice.Balance`, matching the
+reviewed Data Rail. A different invoice ID or invalid balance is `untrusted`;
+provider failure or a redirect is `unavailable`. Supply the exact realm,
+invoice ID, timeout, and Context Source Version from the reviewed contract,
+never from the agent. The application owns token acquisition and refresh; the
+SDK does not store a refresh token or create a QuickBooks connection.
+`Balance` is in the invoice's currency; this source contract does not pin a
+currency, so a numeric threshold must not be presented as currency-qualified
+without another reviewed source.
 
 `LookupCustomerFact` calls your named, read-only lookup with a bounded context.
 Your callback must honor cancellation, keep its database or API credential in
@@ -332,3 +345,39 @@ checks it again against the published source. The model never returns an
 authorization decision. AuthRail records bounded provenance and status, not
 the document or extracted value. A matching model claim is not independent
 proof that the model read the document or interpreted it correctly.
+
+For the reviewed OpenAI Decisions source, use `gpt-6-luna` and one predicate,
+choice, or score question. Pin `OpenAIDecisionsConfigSHA256(question)` as the
+Context Source Version's settings fingerprint before publishing it. The
+protected application supplies the OpenAI key and document bytes; neither
+goes to the agent, sidecar, or AuthRail server:
+
+```go
+question := authrail.DecisionsQuestion{
+    Type: "predicate",
+    Instructions: "Does this message contain a payment card number?",
+    MinConfidence: 0.8,
+}
+digest, err := authrail.OpenAIDecisionsConfigSHA256(question)
+if err != nil { return err }
+if digest != reviewedSource.ModelConfigSHA256 { return errors.New("reviewed contextual question changed") }
+extractor, err := authrail.NewOpenAIDecisionsExtractor(authrail.OpenAIDecisionsConfig{
+    Source: reviewedSource,
+    Question: question,
+    APIKey: openAIKeyHeldByApplication,
+})
+if err != nil { return err }
+fact, err := authrail.ExtractContextFact(ctx, reviewedSource, message.ID,
+    message.SourceLocation, message.ObservedAt, message.Bytes, extractor)
+if err != nil { return err }
+operation.FactResolutions = []authrail.FactResolution{fact}
+```
+
+The Decisions API receives only bounded document text from this protected
+application. A refusal or a predicate probability between the reviewed true
+and false thresholds returns `uncertain`; a sufficiently low probability
+returns `false`. Choice and score answers below the confidence threshold are
+also `uncertain`. Timeout or provider failure returns `unavailable`.
+Neither supplies a trusted fact. A confident answer remains contextual input
+to the published Rail, never a final allow decision or independent proof that
+the model understood the document.

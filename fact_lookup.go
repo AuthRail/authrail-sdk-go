@@ -13,6 +13,8 @@ import (
 
 var stripeAccountPattern = regexp.MustCompile(`^acct_[A-Za-z0-9]{8,80}$`)
 var stripeInvoicePattern = regexp.MustCompile(`^in_[A-Za-z0-9]{4,100}$`)
+var quickBooksRealmPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,80}$`)
+var quickBooksInvoicePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,80}$`)
 var sourceNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.:-]{2,159}$`)
 var accountBoundaryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$`)
 
@@ -85,13 +87,17 @@ func LookupStripeInvoiceStatus(ctx context.Context, source StripeInvoiceSource, 
 	}
 	boundedClient := *client
 	boundedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	if !source.ConnectedAccount {
+	// Verify the account in the same Stripe context used for the invoice read.
+	{
 		accountRequest, err := http.NewRequestWithContext(requestContext, http.MethodGet,
 			"https://api.stripe.com/v1/account", nil)
 		if err != nil {
 			return resolution, nil
 		}
 		accountRequest.SetBasicAuth(source.SecretKey, "")
+		if source.ConnectedAccount {
+			accountRequest.Header.Set("Stripe-Account", source.ProviderAccountID)
+		}
 		accountResponse, err := boundedClient.Do(accountRequest)
 		if err != nil {
 			return resolution, nil
@@ -168,6 +174,81 @@ func validStripeInvoiceStatus(value string) bool {
 	default:
 		return false
 	}
+}
+
+type QuickBooksInvoiceSource struct {
+	SourceVersionID   string
+	ProviderAccountID string
+	Sandbox           bool
+	Timeout           time.Duration
+	AccessToken       string
+	HTTPClient        *http.Client
+}
+
+// LookupQuickBooksInvoiceBalance reads one invoice in the reviewed realm.
+// The protected application owns the OAuth token; a failed read never supplies a value.
+func LookupQuickBooksInvoiceBalance(ctx context.Context, source QuickBooksInvoiceSource,
+	invoiceID string) (FactResolution, error) {
+	if !uuidPattern.MatchString(source.SourceVersionID) ||
+		!quickBooksRealmPattern.MatchString(source.ProviderAccountID) ||
+		!quickBooksInvoicePattern.MatchString(invoiceID) || source.Timeout < 100*time.Millisecond ||
+		source.Timeout > 10*time.Second || strings.TrimSpace(source.AccessToken) == "" ||
+		strings.ContainsAny(source.AccessToken, "\r\n") {
+		return FactResolution{}, errors.New("QuickBooks fact lookup configuration is invalid")
+	}
+	resolution := FactResolution{SourceVersionID: source.SourceVersionID,
+		ProviderAccountID: source.ProviderAccountID, Lookup: "invoice.read",
+		LookupKey: invoiceID, AuthenticatedExecutor: true, Status: "unavailable"}
+	host := "quickbooks.api.intuit.com"
+	if source.Sandbox {
+		host = "sandbox-quickbooks.api.intuit.com"
+	}
+	requestContext, cancel := context.WithTimeout(ctx, source.Timeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodGet,
+		"https://"+host+"/v3/company/"+source.ProviderAccountID+"/invoice/"+invoiceID, nil)
+	if err != nil {
+		return resolution, nil
+	}
+	request.Header.Set("Authorization", "Bearer "+source.AccessToken)
+	request.Header.Set("Accept", "application/json")
+	client := source.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	boundedClient := *client
+	boundedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := boundedClient.Do(request)
+	if err != nil {
+		return resolution, nil
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return resolution, nil
+	}
+	if response.ContentLength > 64*1024 {
+		resolution.Status = "untrusted"
+		return resolution, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024+1))
+	if err != nil || len(body) > 64*1024 || requestContext.Err() != nil {
+		return resolution, nil
+	}
+	var value struct {
+		Invoice struct {
+			ID      string   `json:"Id"`
+			Balance *float64 `json:"Balance"`
+		} `json:"Invoice"`
+	}
+	resolution.Status = "untrusted"
+	if json.Unmarshal(body, &value) != nil || value.Invoice.ID != invoiceID ||
+		value.Invoice.Balance == nil || *value.Invoice.Balance < 0 {
+		return resolution, nil
+	}
+	resolution.Status = "ok"
+	resolution.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	resolution.Value = map[string]any{"Invoice": map[string]any{"Balance": *value.Invoice.Balance}}
+	return resolution, nil
 }
 
 type CustomerSource struct {
