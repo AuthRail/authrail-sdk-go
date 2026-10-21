@@ -74,7 +74,13 @@ receipt, callDecision, resultDecision, err := authrail.Enforce(ctx, client,
 `callDecision` is permission, not execution proof. A successful return means
 the protected callback returned, AuthRail retained its signed success receipt,
 and the result check allowed exposure. The receipt remains an authenticated
-executor assertion, not independent provider proof. On `ApprovalRequired`,
+executor assertion, not independent provider proof.
+The [executable HTTP handler example](examples/enforce-payment/main.go) uses a
+mock provider ledger and one fixed test action key. Replace that key with a
+distinct stable business key for each real effect, and derive the caller from
+your authenticated application context.
+
+On `ApprovalRequired`,
 save the pending value while this process waits for a named human decision,
 then call `ResumeApproval` with the same protected operation. A process restart
 does not restore the in-memory pending callback. An uncertain claim must be
