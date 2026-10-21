@@ -19,6 +19,12 @@ import (
 
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 var keyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+var traceparentPattern = regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`)
+
+func validTraceparent(value string) bool {
+	return value == "" || traceparentPattern.MatchString(value) &&
+		value[3:35] != strings.Repeat("0", 32) && value[36:52] != strings.Repeat("0", 16)
+}
 
 // Client talks only to a sidecar on the same host. It has no deployment credential.
 type Client struct {
@@ -28,6 +34,7 @@ type Client struct {
 	organisationID     string
 	deploymentID       string
 	executorPrivateKey ed25519.PrivateKey
+	clock              func() time.Time
 }
 
 // Config binds one protected application to its local sidecar and signing key.
@@ -52,6 +59,19 @@ type Operation struct {
 	ResourceSource  string
 	FactResolutions []FactResolution
 	Trajectory      *TrajectorySnapshot
+	ReviewSummary   *ReviewSummary
+	Traceparent     string
+}
+
+// ReviewSummary is bounded, safe context shown to named approval reviewers.
+type ReviewSummary struct {
+	Title  string        `json:"title"`
+	Fields []ReviewField `json:"fields"`
+}
+
+type ReviewField struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
 }
 
 // Call carries one authenticated application assertion for an exact action phase.
@@ -67,6 +87,8 @@ type Call struct {
 	Arguments          json.RawMessage
 	FactResolutions    []FactResolution
 	Trajectory         *TrajectorySnapshot
+	ReviewSummary      *ReviewSummary
+	Traceparent        string
 }
 
 type attribution struct {
@@ -79,21 +101,23 @@ type attribution struct {
 
 // Decision is advisory in Observe mode; RecordingStatus does not prove execution.
 type Decision struct {
-	RequestID       string        `json:"requestId"`
-	Mode            string        `json:"mode"`
-	Enforced        bool          `json:"enforced"`
-	Coverage        string        `json:"coverage"`
-	Outcome         string        `json:"outcome"`
-	Sequence        int64         `json:"sequence"`
-	BundleID        *string       `json:"bundleId"`
-	RailVersionIDs  []string      `json:"railVersionIds"`
-	MatchedRuleIDs  []string      `json:"matchedRuleIds"`
-	ReasonCodes     []string      `json:"reasonCodes"`
-	Facts           []FactSummary `json:"facts,omitempty"`
-	RecordingStatus string        `json:"recordingStatus"`
-	ActionID        string        `json:"actionId"`
-	CertificateID   string        `json:"certificateId"`
-	Unresolved      []struct {
+	RequestID         string        `json:"requestId"`
+	Mode              string        `json:"mode"`
+	Enforced          bool          `json:"enforced"`
+	Coverage          string        `json:"coverage"`
+	Outcome           string        `json:"outcome"`
+	Sequence          int64         `json:"sequence"`
+	BundleID          *string       `json:"bundleId"`
+	RailVersionIDs    []string      `json:"railVersionIds"`
+	MatchedRuleIDs    []string      `json:"matchedRuleIds"`
+	ReasonCodes       []string      `json:"reasonCodes"`
+	Facts             []FactSummary `json:"facts,omitempty"`
+	RecordingStatus   string        `json:"recordingStatus"`
+	ActionID          string        `json:"actionId"`
+	CertificateID     string        `json:"certificateId"`
+	ApprovalRequestID string        `json:"approvalRequestId"`
+	ReportReplayed    *bool         `json:"reportReplayed"`
+	Unresolved        []struct {
 		Root   string   `json:"root"`
 		Path   []string `json:"path"`
 		Reason string   `json:"reason"`
@@ -139,7 +163,8 @@ func NewClient(config Config) (*Client, error) {
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Client{endpoint: strings.TrimRight(config.SidecarURL, "/") + "/evaluate", token: config.AdapterToken, http: &copyClient,
 		organisationID: config.OrganisationID, deploymentID: config.DeploymentID,
-		executorPrivateKey: append(ed25519.PrivateKey(nil), config.ExecutorPrivateKey...)}, nil
+		executorPrivateKey: append(ed25519.PrivateKey(nil), config.ExecutorPrivateKey...),
+		clock:              time.Now}, nil
 }
 
 // Observe wraps a function while preserving its Go result and error. The
@@ -167,7 +192,9 @@ func Observe[Input, Output any](ctx context.Context, client *Client, operation O
 		ActionKey: operation.ActionKey, PrincipalID: operation.PrincipalID,
 		SessionID: operation.SessionID, ResourceID: operation.ResourceID,
 		PrincipalSource: operation.PrincipalSource, ResourceSource: operation.ResourceSource,
-		Arguments: arguments, FactResolutions: operation.FactResolutions}
+		Arguments: arguments, FactResolutions: operation.FactResolutions,
+		ReviewSummary: operation.ReviewSummary}
+	call.Traceparent = operation.Traceparent
 	call.Trajectory = operation.Trajectory
 	raw, completed, toolError := client.observeRaw(ctx, call, func(ctx context.Context) (json.RawMessage, error) {
 		var err error
@@ -218,7 +245,7 @@ func (c *Client) observeRaw(ctx context.Context, call Call,
 	callCheck := make(chan Observation, 1)
 	callDone := make(chan struct{})
 	go func() {
-		decision, err := c.evaluate(checkContext, call, "tool_call", nil)
+		decision, err := c.evaluate(checkContext, call, "tool_call", "observe", nil)
 		callCheck <- Observation{CallDecision: decision, CallError: err}
 		close(callDone)
 	}()
@@ -228,7 +255,7 @@ func (c *Client) observeRaw(ctx context.Context, call Call,
 		if jsonObject(result) {
 			go func() {
 				<-callDone
-				decision, err := c.evaluate(checkContext, call, "tool_result", result)
+				decision, err := c.evaluate(checkContext, call, "tool_result", "observe", result)
 				resultCheck <- Observation{ResultDecision: decision, ResultError: err}
 			}()
 		} else {
@@ -272,7 +299,10 @@ func newRequestID() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16]), nil
 }
 
-func (c *Client) evaluate(ctx context.Context, call Call, phase string, result json.RawMessage) (*Decision, error) {
+func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode string, result json.RawMessage) (*Decision, error) {
+	if call.ReviewSummary != nil && expectedMode != "enforce" {
+		return nil, errors.New("review summary requires an Enforce call")
+	}
 	proof, err := c.signIdentityProof(call, phase, result)
 	if err != nil {
 		return nil, err
@@ -286,12 +316,19 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase string, result j
 		Result             json.RawMessage     `json:"result,omitempty"`
 		FactResolutions    []FactResolution    `json:"factResolutions,omitempty"`
 		Trajectory         *TrajectorySnapshot `json:"trajectory,omitempty"`
+		ReviewSummary      *ReviewSummary      `json:"reviewSummary,omitempty"`
 		Attribution        attribution         `json:"attribution"`
 		IdentityProof      identityProof       `json:"identityProof"`
 	}{FormatVersion: 1, RequestID: call.RequestID, OperationVersionID: call.OperationVersionID,
 		Phase: phase, Arguments: call.Arguments, Result: result,
 		FactResolutions: call.FactResolutions,
 		Trajectory:      call.Trajectory,
+		ReviewSummary: func() *ReviewSummary {
+			if phase == "tool_call" {
+				return call.ReviewSummary
+			}
+			return nil
+		}(),
 		Attribution: attribution{PrincipalID: call.PrincipalID,
 			SessionID: call.SessionID, ResourceID: optionalRef(call.ResourceID),
 			PrincipalSource: call.PrincipalSource, ResourceSource: call.ResourceSource}, IdentityProof: proof})
@@ -305,6 +342,12 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase string, result j
 	request.Header.Set("Authorization", "Bearer "+c.token)
 	request.Header.Set("Idempotency-Key", call.ActionKey)
 	request.Header.Set("Content-Type", "application/json")
+	if !validTraceparent(call.Traceparent) {
+		return nil, errors.New("trace context is invalid")
+	}
+	if call.Traceparent != "" {
+		request.Header.Set("traceparent", call.Traceparent)
+	}
 	response, err := c.http.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("sidecar unavailable: %w", err)
@@ -317,7 +360,7 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase string, result j
 	if err := json.NewDecoder(io.LimitReader(response.Body, 128*1024)).Decode(&decision); err != nil {
 		return nil, errors.New("sidecar decision is invalid")
 	}
-	if decision.RequestID != call.RequestID || decision.Mode != "observe" || decision.Enforced ||
+	if decision.RequestID != call.RequestID || decision.Mode != expectedMode || decision.Enforced ||
 		(decision.Coverage != "evaluated" && decision.Coverage != "uncovered" && decision.Coverage != "unavailable") ||
 		!validOutcome(decision.Outcome) {
 		return nil, errors.New("sidecar decision contract is invalid")

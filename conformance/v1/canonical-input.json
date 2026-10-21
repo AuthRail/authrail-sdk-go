@@ -1,0 +1,48 @@
+{
+  "formatVersion": 1,
+  "cases": [
+    {
+      "name": "call arguments sorted",
+      "phase": "tool_call",
+      "arguments": { "invoiceId": "invoice_123", "amount": 40 },
+      "canonicalInput": "{\"arguments\":{\"amount\":40,\"invoiceId\":\"invoice_123\"}}"
+    },
+    {
+      "name": "nested ordering and escaped unsafe text",
+      "phase": "tool_call",
+      "arguments": { "z": "<&>", "a": { "omega": "\u2028", "beta": true } },
+      "canonicalInput": "{\"arguments\":{\"a\":{\"beta\":true,\"omega\":\"\\u2028\"},\"z\":\"\\u003c\\u0026\\u003e\"}}"
+    },
+    {
+      "name": "result phase binds returned object",
+      "phase": "tool_result",
+      "arguments": { "invoiceId": "invoice_123", "amount": 40 },
+      "result": { "status": "paid", "receipt": "pay_123" },
+      "canonicalInput": "{\"arguments\":{\"amount\":40,\"invoiceId\":\"invoice_123\"},\"result\":{\"receipt\":\"pay_123\",\"status\":\"paid\"}}"
+    },
+    {
+      "name": "reviewed fact and prior reads",
+      "phase": "tool_call",
+      "arguments": { "invoiceId": "invoice_123" },
+      "factResolutions": [{
+        "sourceVersionId": "11111111-1111-4111-8111-111111111111",
+        "sourceIdentity": "customer_api",
+        "accountBoundary": "tenant_123",
+        "lookup": "invoice.read",
+        "lookupKey": "invoice_123",
+        "authenticatedExecutor": true,
+        "status": "ok",
+        "observedAt": "2026-10-21T08:00:00Z",
+        "value": { "status": "open" }
+      }],
+      "trajectory": {
+        "sessionId": "task_123",
+        "start": true,
+        "complete": true,
+        "priorReadOperationVersionIds": [],
+        "values": { "risk": 2 }
+      },
+      "canonicalInput": "{\"arguments\":{\"invoiceId\":\"invoice_123\"},\"factResolutions\":[{\"sourceVersionId\":\"11111111-1111-4111-8111-111111111111\",\"sourceIdentity\":\"customer_api\",\"accountBoundary\":\"tenant_123\",\"lookup\":\"invoice.read\",\"lookupKey\":\"invoice_123\",\"authenticatedExecutor\":true,\"status\":\"ok\",\"observedAt\":\"2026-10-21T08:00:00Z\",\"value\":{\"status\":\"open\"}}],\"trajectory\":{\"sessionId\":\"task_123\",\"start\":true,\"complete\":true,\"priorReadOperationVersionIds\":[],\"values\":{\"risk\":2}}}"
+    }
+  ]
+}

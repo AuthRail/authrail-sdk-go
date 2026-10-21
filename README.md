@@ -14,11 +14,12 @@ decide, then returns the function's own result separately from the check.
 recording failure does not stop the function. A decision is not proof of
 execution or universal interception.
 
-This Go package is currently Observe-only. Its `Observe` wrapper continues
-the function even if the deployment is switched to Enforce. Do not count this
-wrapper as an Enforce boundary or switch a deployment that still relies on it;
-use a tested protected adapter with call and result blocking until Go Enforce
-support is delivered.
+`Observe` remains advisory even when a deployment is switched to Enforce.
+Use `Enforce` at a protected function that owns provider credentials and has
+been reviewed for bypass paths. It stops before the effect unless the call is
+fresh, allowed, and centrally retained. It sends authenticated start and
+completion receipts, then checks the result before exposing it. A result
+block cannot undo an effect already completed.
 
 ## Install and prepare
 
@@ -46,6 +47,49 @@ system through a tenant-issued setup key. The later sections show how to add
 trusted session history, live source reads, and bounded AI-assisted facts.
 For a Node.js application, use the
 [Node SDK](https://github.com/AuthRail/authrail-sdk-node) with the same sidecar.
+
+## Enforce a protected action
+
+Use a stable business `ActionKey` across process restarts. The callback must
+use the supplied `ProviderIdempotencyKey` at the provider and retain the
+`ExecutionContext` so it can query the provider after a timeout. An AuthRail
+Action key alone does not deduplicate a provider effect.
+
+```go
+receipt, callDecision, resultDecision, err := authrail.Enforce(ctx, client,
+    authrail.Operation{
+        VersionID: paymentOperationVersionID,
+        ActionKey: invoice.PaymentActionKey,
+        PrincipalID: authenticatedStaff.ID,
+        SessionID: task.ID,
+        ResourceID: invoice.ID,
+        PrincipalSource: "application_session",
+        ResourceSource: "application_lookup",
+    }, paymentRequest, func(ctx context.Context, checked PaymentRequest,
+        execution authrail.ExecutionContext) (PaymentReceipt, error) {
+        return payments.Pay(ctx, checked, execution.ProviderIdempotencyKey)
+    })
+```
+
+`callDecision` is permission, not execution proof. A successful return means
+the protected callback returned, AuthRail retained its signed success receipt,
+and the result check allowed exposure. The receipt remains an authenticated
+executor assertion, not independent provider proof. On `ApprovalRequired`,
+save the pending value while this process waits for a named human decision,
+then call `ResumeApproval` with the same protected operation. A process restart
+does not restore the in-memory pending callback. An uncertain claim must be
+reviewed before any new claim or effect.
+
+On `OutcomeUnknownError`, inspect its `Recovery` value and query the provider
+with the original idempotency key. Call `client.Reconcile` only after that
+lookup establishes success or no effect. Unknown is not failure and never
+permits a blind retry. A fresh attempt requires a new signed call decision and
+any newly required approval. The result hook reports a separate exposure
+decision; it cannot roll back a provider operation.
+
+For request correlation, set `Operation.Traceparent` from the protected
+application's validated W3C trace context. It is telemetry only, not an
+identity or authorization claim.
 
 ## Discover a deployment
 
