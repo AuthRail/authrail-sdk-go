@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -526,6 +527,56 @@ func TestSharedFailureConformance(t *testing.T) {
 				t.Fatalf("unknown fixture error %s", fixture.Error)
 			}
 		})
+	}
+}
+
+func TestEnforceRejectsOversizedResultBeforeSidecarEvaluation(t *testing.T) {
+	resultEvaluations := 0
+	effects := 0
+	client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/evaluate" {
+			var request struct {
+				RequestID string `json:"requestId"`
+				Phase     string `json:"phase"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode evaluation: %v", err)
+				return
+			}
+			if request.Phase == "tool_result" {
+				resultEvaluations++
+			}
+			responseJSON(w, 200, map[string]any{"requestId": request.RequestID,
+				"mode": "enforce", "enforced": false, "coverage": "evaluated",
+				"outcome": "allow", "recordingStatus": "retained",
+				"reportReplayed": false, "actionId": testActionID})
+			return
+		}
+		var receipt struct {
+			Event string `json:"event"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			return
+		}
+		state := "succeeded"
+		if receipt.Event == "started" {
+			state = "executing"
+		}
+		responseJSON(w, 201, map[string]any{"receiptId": testPermitID,
+			"state": state, "replayed": false})
+	})
+	defer closeServer()
+	_, _, _, err := Enforce(context.Background(), client, enforceOperation(), map[string]any{},
+		func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+			effects++
+			return map[string]any{"payload": strings.Repeat("x", 64*1024)}, nil
+		})
+	var blocked *EnforceBlockedError
+	if !errors.As(err, &blocked) || blocked.Phase != "tool_result" ||
+		!blocked.EffectMayHaveOccurred || effects != 1 || resultEvaluations != 0 {
+		t.Fatalf("oversized result was not locally blocked after the effect: %v, effects=%d, evaluations=%d",
+			err, effects, resultEvaluations)
 	}
 }
 

@@ -136,6 +136,23 @@ func TestStripeConnectedAccountMismatchNeverReadsInvoice(t *testing.T) {
 	}
 }
 
+func TestStripeExpiredAccountCheckNeverReadsInvoice(t *testing.T) {
+	invoiceRequests := 0
+	source := stripeSource(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/v1/account" {
+			time.Sleep(120 * time.Millisecond)
+			return stripeResponse(http.StatusOK, `{"id":"acct_12345678","object":"account"}`), nil
+		}
+		invoiceRequests++
+		return stripeResponse(http.StatusOK, `{"id":"in_1234","object":"invoice","status":"paid"}`), nil
+	})
+	source.Timeout = 100 * time.Millisecond
+	fact, err := LookupStripeInvoiceStatus(context.Background(), source, "in_1234")
+	if err != nil || fact.Status != "unavailable" || invoiceRequests != 0 {
+		t.Fatalf("expired account check proceeded to invoice: %+v %v, requests %d", fact, err, invoiceRequests)
+	}
+}
+
 func TestStripeInvoiceLookupDoesNotTrustMismatchOrRedirect(t *testing.T) {
 	for _, scenario := range []struct {
 		name     string

@@ -127,6 +127,9 @@ func LookupStripeInvoiceStatus(ctx context.Context, source StripeInvoiceSource, 
 			return resolution, nil
 		}
 	}
+	if requestContext.Err() != nil {
+		return resolution, nil
+	}
 	request, err := http.NewRequestWithContext(requestContext, http.MethodGet,
 		"https://api.stripe.com/v1/invoices/"+invoiceID, nil)
 	if err != nil {
@@ -150,6 +153,9 @@ func LookupStripeInvoiceStatus(ctx context.Context, source StripeInvoiceSource, 
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024+1))
 	if err != nil || len(body) > 64*1024 {
+		return resolution, nil
+	}
+	if requestContext.Err() != nil {
 		return resolution, nil
 	}
 	var invoice struct {

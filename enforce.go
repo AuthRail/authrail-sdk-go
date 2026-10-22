@@ -214,7 +214,7 @@ func executePermitted[Input, Output any](ctx context.Context, client *Client, ca
 		return zero, nil, &OutcomeUnknownError{Cause: err, Recovery: recovery}
 	}
 	encoded, err := json.Marshal(result)
-	if err != nil || !jsonObject(encoded) {
+	if err != nil || !jsonObject(encoded) || len(encoded) > 64*1024 {
 		return zero, nil, &EnforceBlockedError{Phase: "tool_result", EffectMayHaveOccurred: true, Cause: errors.New("tool result is not a bounded JSON object")}
 	}
 	resultDecision, err := client.evaluate(ctx, call, "tool_result", "enforce", encoded)

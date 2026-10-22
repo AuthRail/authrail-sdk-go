@@ -274,6 +274,17 @@ SDK does not store a refresh token or create a QuickBooks connection.
 currency, so a numeric threshold must not be presented as currency-qualified
 without another reviewed source.
 
+The protected application owns QuickBooks consent and its OAuth callback.
+Bind the returned realm ID to the reviewed account before storing tokens in
+its own encrypted, access-controlled credential store. Refresh before a read
+when needed, serialize refresh per realm, and persist the newest access and
+refresh tokens together before using them. Expired, revoked, or mismatched
+grants produce unavailable context and require reconnection. Keep tokens,
+OAuth codes, and provider response bodies away from the agent, sidecar, and
+AuthRail. Stripe keys also stay in that store, scoped to the reviewed account.
+The SDK consumes an application-supplied access token for one bounded read;
+it does not perform consent, persist tokens, or retry an effect.
+
 `LookupCustomerFact` calls your named, read-only lookup with a bounded context.
 Your callback must honor cancellation, keep its database or API credential in
 the protected application, return the exact source, lookup, and account or
