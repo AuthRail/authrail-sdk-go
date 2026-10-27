@@ -23,7 +23,32 @@ const testActionID = "11111111-1111-4111-8111-111111111111"
 const testApprovalID = "22222222-2222-4222-8222-222222222222"
 const testPermitID = "33333333-3333-4333-8333-333333333333"
 
-func enforceFixture(t *testing.T, handler http.HandlerFunc) (*Client, func()) {
+func TestGuardProcessingHonoursCancellationEvenWhenHandlerDoesNot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	defer close(release)
+	go func() {
+		_, err := runGuardHandler(ctx, GuardHandler{Process: func(context.Context, string) (string, error) {
+			close(started)
+			<-release
+			return "unsafe late output", nil
+		}}, "private")
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("handler output escaped cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("non-cooperative handler held the caller after cancellation")
+	}
+}
+
+func enforceFixture(t *testing.T, handler http.HandlerFunc, handlers ...GuardHandler) (*Client, func()) {
 	t.Helper()
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -34,7 +59,7 @@ func enforceFixture(t *testing.T, handler http.HandlerFunc) (*Client, func()) {
 		AdapterToken:       "adapter-token-123456789012345678901234567890",
 		OrganisationID:     "44444444-4444-4444-8444-444444444444",
 		DeploymentID:       "55555555-5555-4555-8555-555555555555",
-		ExecutorPrivateKey: private})
+		ExecutorPrivateKey: private, GuardHandlers: handlers})
 	if err != nil {
 		server.Close()
 		t.Fatal(err)
@@ -162,21 +187,26 @@ func TestEnforceBlocksUnprovenStartAndUnknownOutcome(t *testing.T) {
 
 func TestEnforceApprovalClaimIsSingleUse(t *testing.T) {
 	called := 0
+	processed := 0
+	version := strings.Repeat("a", 64)
 	client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/guard-requirements":
+			phase := r.URL.Query().Get("phase")
+			requirements := []GuardRequirement{}
+			if phase == "tool_call" {
+				requirements = append(requirements, GuardRequirement{RailVersionID: testActionID, RuleID: "content", Kind: "sanitize", HandlerID: "redact", HandlerVersion: version, Target: GuardTarget{Root: "arguments", Path: []string{"memo"}}})
+			}
+			responseJSON(w, 200, guardPlan{FormatVersion: 1, OperationVersionID: enforceOperation().VersionID, Phase: phase, BundleID: testPermitID, Sequence: 1, Coverage: "evaluated", Requirements: requirements})
 		case "/evaluate":
 			var request struct {
 				RequestID string `json:"requestId"`
 				Phase     string `json:"phase"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&request)
-			outcome := "approval_required"
-			if request.Phase == "tool_result" {
-				outcome = "allow"
-			}
 			responseJSON(w, 200, map[string]any{"requestId": request.RequestID, "mode": "enforce", "enforced": false,
-				"coverage": "evaluated", "outcome": outcome, "recordingStatus": "retained",
-				"reportReplayed": false, "actionId": testActionID, "approvalRequestId": testApprovalID})
+				"coverage": "evaluated", "outcome": "approval_required", "recordingStatus": "retained",
+				"reportReplayed": false, "actionId": testActionID, "approvalRequestId": testApprovalID, "bundleId": testPermitID, "sequence": 1})
 		case "/approval-permits/claim":
 			responseJSON(w, 201, map[string]any{"permitId": testPermitID, "actionId": testActionID,
 				"expiresAt": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)})
@@ -191,11 +221,11 @@ func TestEnforceApprovalClaimIsSingleUse(t *testing.T) {
 			}
 			responseJSON(w, 201, map[string]any{"receiptId": testPermitID, "state": state, "replayed": false})
 		}
-	})
+	}, GuardHandler{ID: "redact", Version: version, Kind: "sanitize", Process: func(_ context.Context, input string) (string, error) { processed++; return "safe", nil }})
 	defer closeServer()
 	operation := enforceOperation()
 	operation.ReviewSummary = &ReviewSummary{Title: "Pay invoice", Fields: []ReviewField{{Label: "Amount", Value: "400"}}}
-	_, _, _, err := Enforce(context.Background(), client, operation, map[string]any{"amount": 400},
+	_, _, _, err := Enforce(context.Background(), client, operation, map[string]any{"amount": 400, "memo": "private"},
 		func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
 			called++
 			return map[string]any{}, nil
@@ -205,11 +235,14 @@ func TestEnforceApprovalClaimIsSingleUse(t *testing.T) {
 		t.Fatalf("approval should pause: %v", err)
 	}
 	_, _, err = ResumeApproval(context.Background(), pending,
-		func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+		func(_ context.Context, checked map[string]any, _ ExecutionContext) (map[string]any, error) {
 			called++
+			if checked["memo"] != "safe" {
+				t.Error("approval resumed unprocessed arguments")
+			}
 			return map[string]any{"ok": true}, nil
 		})
-	if err != nil || called != 1 {
+	if err != nil || called != 1 || processed != 1 {
 		t.Fatalf("approval did not resume: %v, %d", err, called)
 	}
 	_, _, err = ResumeApproval(context.Background(), pending,
@@ -364,6 +397,7 @@ func TestSharedCanonicalInput(t *testing.T) {
 			Result          json.RawMessage     `json:"result"`
 			FactResolutions []FactResolution    `json:"factResolutions"`
 			Trajectory      *TrajectorySnapshot `json:"trajectory"`
+			GuardEvidence   []GuardEvidence     `json:"guardEvidence"`
 			CanonicalInput  string              `json:"canonicalInput"`
 		} `json:"cases"`
 	}
@@ -373,7 +407,7 @@ func TestSharedCanonicalInput(t *testing.T) {
 	for _, fixture := range corpus.Cases {
 		t.Run(fixture.Name, func(t *testing.T) {
 			encoded, err := encodeIdentityInput(Call{Arguments: fixture.Arguments,
-				FactResolutions: fixture.FactResolutions, Trajectory: fixture.Trajectory},
+				FactResolutions: fixture.FactResolutions, Trajectory: fixture.Trajectory, GuardEvidence: fixture.GuardEvidence},
 				fixture.Phase, fixture.Result)
 			if err != nil || string(encoded) != fixture.CanonicalInput {
 				t.Fatalf("canonical mismatch: %v\nactual: %s\nexpected: %s", err, encoded, fixture.CanonicalInput)
@@ -636,5 +670,254 @@ func TestEnforceDecodesBeforeStartAndReportsAfterCancellation(t *testing.T) {
 	var unknown *OutcomeUnknownError
 	if !errors.As(err, &unknown) || startCount != 1 || unknownCount != 1 {
 		t.Fatalf("unknown outcome lost after cancel: %v, starts=%d unknowns=%d", err, startCount, unknownCount)
+	}
+}
+
+// Guard processing must change only reviewed fields before permission and never
+// expose the original result. Duplicate requirements must not process twice.
+func TestEnforceGuardProcessingBindsCallAndResult(t *testing.T) {
+	version := strings.Repeat("a", 64)
+	processedCalls, processedResults := 0, 0
+	var retainedEvidence GuardEvidence
+	client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/guard-requirements":
+			if r.Method != http.MethodGet || r.Header.Get("Authorization") == "" || r.URL.Query().Get("operationVersionId") != enforceOperation().VersionID {
+				t.Error("requirements lookup was not authenticated and operation-bound")
+			}
+			phase := r.URL.Query().Get("phase")
+			root, field, kind, id := "arguments", "message", "sanitize", "redact"
+			if phase == "tool_result" {
+				root, field, kind, id = "result", "text", "transform", "release"
+			}
+			item := GuardRequirement{RailVersionID: testApprovalID, RuleID: "content", Kind: kind, HandlerID: id, HandlerVersion: version, Target: GuardTarget{Root: root, Path: []string{field}}}
+			duplicate := item
+			duplicate.RailVersionID = testActionID
+			responseJSON(w, 200, guardPlan{FormatVersion: 1, OperationVersionID: enforceOperation().VersionID, Phase: phase, BundleID: testPermitID, Sequence: 1, Coverage: "evaluated", Requirements: []GuardRequirement{item, duplicate}})
+		case "/evaluate":
+			var request struct {
+				RequestID string          `json:"requestId"`
+				Phase     string          `json:"phase"`
+				Arguments map[string]any  `json:"arguments"`
+				Result    map[string]any  `json:"result"`
+				Evidence  []GuardEvidence `json:"guardEvidence"`
+				Proof     identityProof   `json:"identityProof"`
+			}
+			if json.NewDecoder(r.Body).Decode(&request) != nil || request.Proof.Signature == "" {
+				t.Error("processed evaluation was unsigned")
+			}
+			if request.Arguments["message"] != "safe input" || request.Arguments["invoiceId"] != "invoice-123" {
+				t.Error("wrong call fields processed")
+			}
+			if request.Phase == "tool_call" {
+				if len(request.Evidence) != 1 {
+					t.Errorf("call evidence count %d", len(request.Evidence))
+					return
+				}
+				retainedEvidence = request.Evidence[0]
+			} else if len(request.Evidence) != 2 || !reflect.DeepEqual(retainedEvidence, request.Evidence[0]) || request.Result["text"] != "safe output" || request.Result["kept"] != true {
+				t.Error("result processing lost call evidence or released private output")
+			}
+			responseJSON(w, 200, map[string]any{"requestId": request.RequestID, "mode": "enforce", "enforced": false, "coverage": "evaluated", "outcome": "allow", "bundleId": testPermitID, "sequence": 1, "recordingStatus": "retained", "reportReplayed": false, "actionId": testActionID})
+		case "/execution-receipts":
+			var receipt struct {
+				Event  string `json:"event"`
+				Digest string `json:"inputSha256"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&receipt)
+			evidence, _ := json.Marshal(retainedEvidence)
+			canonical := `{"arguments":{"invoiceId":"invoice-123","message":"safe input"},"guardEvidence":[` + string(evidence) + `]}`
+			digest := sha256.Sum256([]byte(canonical))
+			if receipt.Digest != hex.EncodeToString(digest[:]) {
+				t.Error("effect digest lost call evidence")
+			}
+			state := "succeeded"
+			if receipt.Event == "started" {
+				state = "executing"
+			}
+			responseJSON(w, 201, map[string]any{"receiptId": testPermitID, "state": state, "replayed": false})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}, GuardHandler{ID: "redact", Version: version, Kind: "sanitize", Process: func(_ context.Context, input string) (string, error) {
+		processedCalls++
+		if input != "private input" {
+			t.Error("wrong call processor input")
+		}
+		return "safe input", nil
+	}}, GuardHandler{ID: "release", Version: version, Kind: "transform", Process: func(_ context.Context, input string) (string, error) {
+		processedResults++
+		if input != "private output" {
+			t.Error("wrong result processor input")
+		}
+		return "safe output", nil
+	}})
+	defer closeServer()
+	input := map[string]any{"invoiceId": "invoice-123", "message": "private input"}
+	result, _, _, err := Enforce(context.Background(), client, enforceOperation(), input, func(_ context.Context, checked map[string]any, _ ExecutionContext) (map[string]any, error) {
+		if checked["message"] != "safe input" {
+			t.Error("protected tool saw private input")
+		}
+		return map[string]any{"text": "private output", "kept": true}, nil
+	})
+	if err != nil || processedCalls != 1 || processedResults != 1 || result["text"] != "safe output" || input["message"] != "private input" {
+		t.Fatalf("Guard processing boundary failed: %v %v calls=%d results=%d", result, err, processedCalls, processedResults)
+	}
+	before := sha256.Sum256([]byte(`"private input"`))
+	after := sha256.Sum256([]byte(`"safe input"`))
+	if retainedEvidence.InputSHA256 != hex.EncodeToString(before[:]) || retainedEvidence.OutputSHA256 != hex.EncodeToString(after[:]) {
+		t.Fatal("evidence is not a canonical JSON string digest")
+	}
+}
+
+// An unavailable, substituted, stale, or conflicting requirement must never reach
+// the protected effect, even if another endpoint would return allow.
+func TestEnforceGuardPlanFailuresStopBeforeEffect(t *testing.T) {
+	version := strings.Repeat("a", 64)
+	for _, failure := range []string{"unavailable", "wrong operation", "wrong phase", "wrong version", "isolation", "overlap", "stale bundle"} {
+		t.Run(failure, func(t *testing.T) {
+			processed, executed := 0, 0
+			client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/guard-requirements" {
+					if failure == "unavailable" {
+						w.WriteHeader(503)
+						return
+					}
+					plan := guardPlan{FormatVersion: 1, OperationVersionID: enforceOperation().VersionID, Phase: "tool_call", BundleID: testPermitID, Sequence: 1, Coverage: "evaluated", Requirements: []GuardRequirement{{RailVersionID: testApprovalID, RuleID: "content", Kind: "sanitize", HandlerID: "redact", HandlerVersion: version, Target: GuardTarget{Root: "arguments", Path: []string{"message"}}}}}
+					switch failure {
+					case "wrong operation":
+						plan.OperationVersionID = testActionID
+					case "wrong phase":
+						plan.Phase = "tool_result"
+					case "wrong version":
+						plan.Requirements[0].HandlerVersion = strings.Repeat("b", 64)
+					case "isolation":
+						plan.Requirements[0].Kind = "isolate"
+					case "overlap":
+						other := plan.Requirements[0]
+						other.Target.Path = []string{"message", "nested"}
+						plan.Requirements = append(plan.Requirements, other)
+					}
+					responseJSON(w, 200, plan)
+					return
+				}
+				if r.URL.Path != "/evaluate" || failure != "stale bundle" {
+					t.Error("invalid plan reached execution path")
+				}
+				var request struct {
+					RequestID string `json:"requestId"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&request)
+				responseJSON(w, 200, map[string]any{"requestId": request.RequestID, "mode": "enforce", "enforced": false, "coverage": "evaluated", "outcome": "allow", "bundleId": testActionID, "sequence": 2, "recordingStatus": "retained", "reportReplayed": false, "actionId": testActionID})
+			}, GuardHandler{ID: "redact", Version: version, Kind: "sanitize", Process: func(_ context.Context, input string) (string, error) { processed++; return input, nil }})
+			defer closeServer()
+			_, _, _, err := Enforce(context.Background(), client, enforceOperation(), map[string]any{"message": "private"}, func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+				executed++
+				return nil, nil
+			})
+			var blocked *EnforceBlockedError
+			if !errors.As(err, &blocked) || blocked.Phase != "tool_call" || executed != 0 || (failure != "stale bundle" && processed != 0) {
+				t.Fatalf("Guard failure did not stop safely: %v processors=%d effects=%d", err, processed, executed)
+			}
+		})
+	}
+}
+
+// Failed result processing follows a possible effect but must release no raw data.
+func TestEnforceGuardResultFailureWithholdsOutput(t *testing.T) {
+	version := strings.Repeat("a", 64)
+	client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/guard-requirements":
+			phase := r.URL.Query().Get("phase")
+			requirements := []GuardRequirement{}
+			if phase == "tool_result" {
+				requirements = append(requirements, GuardRequirement{RailVersionID: testApprovalID, RuleID: "output", Kind: "sanitize", HandlerID: "redact", HandlerVersion: version, Target: GuardTarget{Root: "result", Path: []string{"text"}}})
+			}
+			responseJSON(w, 200, guardPlan{FormatVersion: 1, OperationVersionID: enforceOperation().VersionID, Phase: phase, BundleID: testPermitID, Sequence: 1, Coverage: "evaluated", Requirements: requirements})
+		case "/evaluate":
+			var request struct {
+				RequestID string `json:"requestId"`
+				Phase     string `json:"phase"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			if request.Phase != "tool_call" {
+				t.Error("failed result processing reached evaluation")
+			}
+			responseJSON(w, 200, map[string]any{"requestId": request.RequestID, "mode": "enforce", "enforced": false, "coverage": "evaluated", "outcome": "allow", "bundleId": testPermitID, "sequence": 1, "recordingStatus": "retained", "reportReplayed": false, "actionId": testActionID})
+		case "/execution-receipts":
+			var receipt struct {
+				Event string `json:"event"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&receipt)
+			state := "succeeded"
+			if receipt.Event == "started" {
+				state = "executing"
+			}
+			responseJSON(w, 201, map[string]any{"receiptId": testPermitID, "state": state, "replayed": false})
+		}
+	}, GuardHandler{ID: "redact", Version: version, Kind: "sanitize", Process: func(context.Context, string) (string, error) { return "", errors.New("processor unavailable") }})
+	defer closeServer()
+	result, _, _, err := Enforce(context.Background(), client, enforceOperation(), map[string]any{}, func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+		return map[string]any{"text": "private"}, nil
+	})
+	var blocked *EnforceBlockedError
+	if !errors.As(err, &blocked) || blocked.Phase != "tool_result" || !blocked.EffectMayHaveOccurred || result != nil {
+		t.Fatalf("raw output leaked or effect uncertainty lost: %v %v", result, err)
+	}
+}
+
+// Outcome reporting must retain the original signed attempt without issuing permission.
+func TestObservedExecutionSignsExactAttemptWithoutPermit(t *testing.T) {
+	var client *Client
+	var call Call
+	sends := 0
+	client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		sends++
+		if r.URL.Path != "/execution/observed-receipts" {
+			t.Error("unexpected permission path")
+		}
+		var body struct {
+			OperationVersionID     string        `json:"operationVersionId"`
+			ActionKey              string        `json:"actionKey"`
+			AttemptID              string        `json:"attemptId"`
+			Event                  string        `json:"event"`
+			InputSHA256            string        `json:"inputSha256"`
+			ProviderIdempotencyKey string        `json:"providerIdempotencyKey"`
+			ProviderReference      *string       `json:"providerReference"`
+			KeySHA256              string        `json:"keySha256"`
+			Proof                  identityProof `json:"proof"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			t.Fatal("invalid outcome body")
+		}
+		if body.AttemptID != call.RequestID || body.OperationVersionID != call.OperationVersionID {
+			t.Error("wrong original attempt")
+		}
+		input, _ := encodeIdentityInput(call, "tool_call", nil)
+		digest := sha256.Sum256(input)
+		if body.InputSHA256 != hex.EncodeToString(digest[:]) {
+			t.Error("wrong exact input")
+		}
+		statement := fmt.Sprintf(`{"type":"authrail.execution.receipt.observe.v1","organisationId":"%s","deploymentId":"%s","operationVersionId":"%s","actionKey":"%s","attemptId":"%s","event":"succeeded","inputSha256":"%s","providerIdempotencyKey":"effect-key","providerReference":null,"keySha256":"%s","issuedAt":%d,"expiresAt":%d}`, client.organisationID, client.deploymentID, body.OperationVersionID, body.ActionKey, body.AttemptID, body.InputSHA256, body.KeySHA256, body.Proof.IssuedAt, body.Proof.ExpiresAt)
+		signature, _ := base64.RawURLEncoding.DecodeString(body.Proof.Signature)
+		if !ed25519.Verify(client.executorPrivateKey.Public().(ed25519.PublicKey), []byte(statement), signature) {
+			t.Error("outcome signature is invalid")
+		}
+		if ed25519.Verify(client.executorPrivateKey.Public().(ed25519.PublicKey), []byte(strings.Replace(statement, "succeeded", "failed", 1)), signature) {
+			t.Error("altered outcome signature accepted")
+		}
+		responseJSON(w, http.StatusAccepted, map[string]string{"recordingStatus": "queued"})
+	})
+	defer closeServer()
+	var err error
+	call = sampleCall()
+	result, err := client.ReportObservedExecution(context.Background(), call, ObservedExecutionOutcome{Event: "succeeded", ProviderIdempotencyKey: "effect-key"})
+	if err != nil || result.RecordingStatus != "queued" {
+		t.Fatalf("valid receipt rejected: %+v %v", result, err)
+	}
+	_, err = client.ReportObservedExecution(context.Background(), call, ObservedExecutionOutcome{Event: "started", ProviderIdempotencyKey: "effect-key"})
+	if err == nil || sends != 1 {
+		t.Fatal("observed outcome accepted a start or issued another request")
 	}
 }

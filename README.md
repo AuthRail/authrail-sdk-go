@@ -75,6 +75,10 @@ receipt, callDecision, resultDecision, err := authrail.Enforce(ctx, client,
 the protected callback returned, AuthRail retained its signed success receipt,
 and the result check allowed exposure. The receipt remains an authenticated
 executor assertion, not independent provider proof.
+A Policy can report `approval_required` again at the result hook. The Go adapter
+releases that retained result only after a one-use permit was claimed for the
+same Action. Denied, missing, replayed, or different-Action results remain
+blocked after the provider callback.
 The [executable HTTP handler example](examples/enforce-payment/main.go) uses a
 mock provider ledger and one fixed test action key. Replace that key with a
 distinct stable business key for each real effect, and derive the caller from
@@ -211,6 +215,18 @@ signed assertion proves that the application key supplied the references; your
 application still authenticates the person and resolves the resource.
 
 ## Supply prior session reads
+
+For a Guard that requires string processing, register `Config.GuardHandlers`
+with its exact reviewed ID, SHA-256 version, kind (`sanitize` or `transform`),
+and a side-effect-free `Process(context.Context, string) (string, error)`.
+Enforce reads requirements from the authenticated local sidecar, processes only
+the reviewed string fields, and signs before/after digests. Result processing
+happens before exposure. Missing handlers, stale plans, conflicts, errors,
+and unsupported isolation block the boundary. Each handler has four seconds
+or the caller's earlier cancellation. A handler that ignores cancellation may
+continue locally; it must never perform business effects. Approval resumes
+reuse the processed call. Observe never runs processors. These assertions do
+not independently verify handler code or sandbox containment.
 
 For a Guard rule that checks an earlier read, the protected application may
 attach a `TrajectorySnapshot` to the Operation. Use the authenticated task's
@@ -392,3 +408,21 @@ also `uncertain`. Timeout or provider failure returns `unavailable`.
 Neither supplies a trusted fact. A confident answer remains contextual input
 to the published Rail, never a final allow decision or independent proof that
 the model understood the document.
+
+
+### Observe execution outcomes
+
+`Observation.Call` contains the frozen original attempt after the advisory
+checks complete. Pass it to `client.ReportObservedExecution(ctx, *checks.Call,
+outcome)` with an `ObservedExecutionOutcome`: `Event`, the executor's stable
+`ProviderIdempotencyKey`, and optional `ProviderReference`. Supported events
+are `succeeded`, `failed`, `unknown`, `reconciled_succeeded`, and
+`reconciled_failed`. A tool error normally needs `unknown` until the executor
+can establish whether its effect happened. Never infer success from an allow
+decision, and never rerun an operation to retry its receipt.
+
+`RecordingStatus` distinguishes local durable `queued` delivery from central
+`retained` evidence. A retained response supplies Action and receipt IDs.
+Reporting is separate from execution and does not request a permit or change
+Observe's advisory decision. Keep the original call until report delivery is
+acknowledged; send only bounded references and exact input digests.

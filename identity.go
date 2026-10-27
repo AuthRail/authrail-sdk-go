@@ -80,7 +80,8 @@ func encodeIdentityInput(call Call, phase string, result json.RawMessage) ([]byt
 		Result          map[string]any      `json:"result,omitempty"`
 		FactResolutions []FactResolution    `json:"factResolutions,omitempty"`
 		Trajectory      *TrajectorySnapshot `json:"trajectory,omitempty"`
-	}{Arguments: args, FactResolutions: call.FactResolutions, Trajectory: call.Trajectory}
+		GuardEvidence   []GuardEvidence     `json:"guardEvidence,omitempty"`
+	}{Arguments: args, FactResolutions: call.FactResolutions, Trajectory: call.Trajectory, GuardEvidence: call.GuardEvidence}
 	if phase == "tool_result" {
 		if json.Unmarshal(result, &input.Result) != nil || input.Result == nil {
 			return nil, errors.New("Observe result is invalid")

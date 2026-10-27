@@ -94,6 +94,10 @@ func Enforce[Input, Output any](ctx context.Context, client *Client, operation O
 	if err != nil {
 		return zero, nil, nil, &EnforceBlockedError{Phase: "tool_call", Cause: err}
 	}
+	call, _, err = client.processGuardPhase(ctx, call, "tool_call", nil)
+	if err != nil {
+		return zero, nil, nil, &EnforceBlockedError{Phase: "tool_call", Cause: err}
+	}
 	decision, err := client.evaluate(ctx, call, "tool_call", "enforce", nil)
 	if err != nil {
 		return zero, nil, nil, &EnforceBlockedError{Phase: "tool_call", Cause: err}
@@ -179,6 +183,20 @@ func permitted(decision *Decision) bool {
 		decision.RecordingStatus == "retained" && decision.ReportReplayed != nil && !*decision.ReportReplayed
 }
 
+func permittedResult(result, call *Decision, permitID *string) bool {
+	if permitted(result) {
+		return call != nil && result.ActionID == call.ActionID
+	}
+	// Policy approval is re-evaluated at the result hook. Only a previously
+	// claimed permit for this exact Action can release that result.
+	return permitID != nil && *permitID != "" && call != nil &&
+		call.Outcome == "approval_required" && result != nil &&
+		result.Mode == "enforce" && !result.Enforced &&
+		result.Coverage == "evaluated" && result.Outcome == "approval_required" &&
+		result.RecordingStatus == "retained" && result.ReportReplayed != nil &&
+		!*result.ReportReplayed && call.ActionID != "" && result.ActionID == call.ActionID
+}
+
 func executePermitted[Input, Output any](ctx context.Context, client *Client, call Call,
 	decision *Decision, permitID *string,
 	execute func(context.Context, Input, ExecutionContext) (Output, error)) (Output, *Decision, error) {
@@ -217,9 +235,22 @@ func executePermitted[Input, Output any](ctx context.Context, client *Client, ca
 	if err != nil || !jsonObject(encoded) || len(encoded) > 64*1024 {
 		return zero, nil, &EnforceBlockedError{Phase: "tool_result", EffectMayHaveOccurred: true, Cause: errors.New("tool result is not a bounded JSON object")}
 	}
+	call, encoded, err = client.processGuardPhase(ctx, call, "tool_result", encoded)
+	if err != nil {
+		return zero, nil, &EnforceBlockedError{Phase: "tool_result", EffectMayHaveOccurred: true, Cause: err}
+	}
 	resultDecision, err := client.evaluate(ctx, call, "tool_result", "enforce", encoded)
-	if err != nil || !permitted(resultDecision) {
+	if err != nil || !permittedResult(resultDecision, decision, permitID) {
 		return zero, resultDecision, &EnforceBlockedError{Phase: "tool_result", EffectMayHaveOccurred: true, Decision: resultDecision, Cause: err}
+	}
+	if len(client.guardHandlers) > 0 {
+		// Return only the processed representation after its retained result check.
+		// The tool's original object must never bypass a result transformation.
+		var processed Output
+		if err := json.Unmarshal(encoded, &processed); err != nil {
+			return zero, resultDecision, &EnforceBlockedError{Phase: "tool_result", EffectMayHaveOccurred: true, Decision: resultDecision, Cause: err}
+		}
+		return processed, resultDecision, nil
 	}
 	return result, resultDecision, nil
 }
@@ -233,7 +264,8 @@ func callInputDigest(call Call) (string, error) {
 		Arguments       map[string]any      `json:"arguments"`
 		FactResolutions []FactResolution    `json:"factResolutions,omitempty"`
 		Trajectory      *TrajectorySnapshot `json:"trajectory,omitempty"`
-	}{arguments, call.FactResolutions, call.Trajectory})
+		GuardEvidence   []GuardEvidence     `json:"guardEvidence,omitempty"`
+	}{arguments, call.FactResolutions, call.Trajectory, callGuardEvidence(call.GuardEvidence)})
 	if err != nil {
 		return "", err
 	}
@@ -399,7 +431,7 @@ func (c *Client) postLocal(ctx context.Context, path, idempotencyKey string, bod
 		return 0, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusCreated {
+	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusAccepted {
 		return response.StatusCode, fmt.Errorf("sidecar returned HTTP %d", response.StatusCode)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 128*1024))

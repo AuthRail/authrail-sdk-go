@@ -35,6 +35,7 @@ type Client struct {
 	deploymentID       string
 	executorPrivateKey ed25519.PrivateKey
 	clock              func() time.Time
+	guardHandlers      []GuardHandler
 }
 
 // Config binds one protected application to its local sidecar and signing key.
@@ -46,6 +47,8 @@ type Config struct {
 	OrganisationID     string
 	DeploymentID       string
 	ExecutorPrivateKey ed25519.PrivateKey
+	// GuardHandlers run only during Enforce, at exact reviewed string targets.
+	GuardHandlers []GuardHandler
 }
 
 // Operation identifies the reviewed action and a stable key from the workflow.
@@ -89,6 +92,9 @@ type Call struct {
 	Trajectory         *TrajectorySnapshot
 	ReviewSummary      *ReviewSummary
 	Traceparent        string
+	GuardEvidence      []GuardEvidence
+	guardBundleID      string
+	guardSequence      int64
 }
 
 type attribution struct {
@@ -101,22 +107,23 @@ type attribution struct {
 
 // Decision is advisory in Observe mode; RecordingStatus does not prove execution.
 type Decision struct {
-	RequestID         string        `json:"requestId"`
-	Mode              string        `json:"mode"`
-	Enforced          bool          `json:"enforced"`
-	Coverage          string        `json:"coverage"`
-	Outcome           string        `json:"outcome"`
-	Sequence          int64         `json:"sequence"`
-	BundleID          *string       `json:"bundleId"`
-	RailVersionIDs    []string      `json:"railVersionIds"`
-	MatchedRuleIDs    []string      `json:"matchedRuleIds"`
-	ReasonCodes       []string      `json:"reasonCodes"`
-	Facts             []FactSummary `json:"facts,omitempty"`
-	RecordingStatus   string        `json:"recordingStatus"`
-	ActionID          string        `json:"actionId"`
-	CertificateID     string        `json:"certificateId"`
-	ApprovalRequestID string        `json:"approvalRequestId"`
-	ReportReplayed    *bool         `json:"reportReplayed"`
+	RequestID         string                  `json:"requestId"`
+	Mode              string                  `json:"mode"`
+	Enforced          bool                    `json:"enforced"`
+	Coverage          string                  `json:"coverage"`
+	Outcome           string                  `json:"outcome"`
+	Sequence          int64                   `json:"sequence"`
+	BundleID          *string                 `json:"bundleId"`
+	RailVersionIDs    []string                `json:"railVersionIds"`
+	MatchedRuleIDs    []string                `json:"matchedRuleIds"`
+	ReasonCodes       []string                `json:"reasonCodes"`
+	Facts             []FactSummary           `json:"facts,omitempty"`
+	Obligations       []GuardObligationStatus `json:"obligations,omitempty"`
+	RecordingStatus   string                  `json:"recordingStatus"`
+	ActionID          string                  `json:"actionId"`
+	CertificateID     string                  `json:"certificateId"`
+	ApprovalRequestID string                  `json:"approvalRequestId"`
+	ReportReplayed    *bool                   `json:"reportReplayed"`
 	Unresolved        []struct {
 		Root   string   `json:"root"`
 		Path   []string `json:"path"`
@@ -127,6 +134,8 @@ type Decision struct {
 // Observation reports both decision checks. Errors are coverage gaps, not tool errors.
 // Observation keeps call and result checks separate from the tool's own error.
 type Observation struct {
+	// Call is the original frozen attempt used to bind optional execution outcome evidence.
+	Call           *Call
 	CallDecision   *Decision
 	ResultDecision *Decision
 	CallError      error
@@ -152,6 +161,10 @@ func NewClient(config Config) (*Client, error) {
 	if subtle.ConstantTimeCompare(derived, config.ExecutorPrivateKey) != 1 {
 		return nil, errors.New("executor signing key is invalid")
 	}
+	handlers, err := registeredGuardHandlers(config.GuardHandlers)
+	if err != nil {
+		return nil, err
+	}
 	transport := config.HTTPClient
 	if transport == nil {
 		transport = &http.Client{}
@@ -164,7 +177,7 @@ func NewClient(config Config) (*Client, error) {
 	return &Client{endpoint: strings.TrimRight(config.SidecarURL, "/") + "/evaluate", token: config.AdapterToken, http: &copyClient,
 		organisationID: config.OrganisationID, deploymentID: config.DeploymentID,
 		executorPrivateKey: append(ed25519.PrivateKey(nil), config.ExecutorPrivateKey...),
-		clock:              time.Now}, nil
+		clock:              time.Now, guardHandlers: handlers}, nil
 }
 
 // Observe wraps a function while preserving its Go result and error. The
@@ -267,6 +280,7 @@ func (c *Client) observeRaw(ctx context.Context, call Call,
 	go func() {
 		callObservation := <-callCheck
 		resultObservation := <-resultCheck
+		callObservation.Call = &call
 		callObservation.ResultDecision = resultObservation.ResultDecision
 		callObservation.ResultError = resultObservation.ResultError
 		observation <- callObservation
@@ -316,6 +330,7 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 		Result             json.RawMessage     `json:"result,omitempty"`
 		FactResolutions    []FactResolution    `json:"factResolutions,omitempty"`
 		Trajectory         *TrajectorySnapshot `json:"trajectory,omitempty"`
+		GuardEvidence      []GuardEvidence     `json:"guardEvidence,omitempty"`
 		ReviewSummary      *ReviewSummary      `json:"reviewSummary,omitempty"`
 		Attribution        attribution         `json:"attribution"`
 		IdentityProof      identityProof       `json:"identityProof"`
@@ -323,6 +338,7 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 		Phase: phase, Arguments: call.Arguments, Result: result,
 		FactResolutions: call.FactResolutions,
 		Trajectory:      call.Trajectory,
+		GuardEvidence:   call.GuardEvidence,
 		ReviewSummary: func() *ReviewSummary {
 			if phase == "tool_call" {
 				return call.ReviewSummary
@@ -364,6 +380,10 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 		(decision.Coverage != "evaluated" && decision.Coverage != "uncovered" && decision.Coverage != "unavailable") ||
 		!validOutcome(decision.Outcome) {
 		return nil, errors.New("sidecar decision contract is invalid")
+	}
+	if expectedMode == "enforce" && call.guardBundleID != "" &&
+		(decision.BundleID == nil || *decision.BundleID != call.guardBundleID || decision.Sequence != call.guardSequence) {
+		return nil, errors.New("Guard requirements changed before evaluation")
 	}
 	return &decision, nil
 }
