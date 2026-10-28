@@ -4,49 +4,196 @@
 
 # AuthRail Go SDK
 
-The AuthRail Go SDK is an adapter for checking AI-requested actions in a
-protected Go application. Put its checks at the function that handles each
-action. Your application keeps the tool, provider credentials, and business
-workflow. The SDK asks a sidecar on the same host what the active Rails would
-decide, then returns the function's own result separately from the check.
+AuthRail helps you see what your AI agents are doing and set rules for the
+actions they may take. In your AuthRail workspace, you describe an action,
+publish its rules, and review the decisions and execution reports it produces.
+Those published rules are called **Rails**.
 
-**Observe checks are advisory.** A would-deny decision, missing sidecar, or
-recording failure does not stop the function. A decision is not proof of
-execution or universal interception.
+This SDK connects a Go application to AuthRail. Add it around the function
+that handles an AI-requested action, such as paying an invoice or posting a
+message. Your application keeps its business logic and provider credentials.
+The SDK checks the call and its result with an AuthRail **sidecar**: a small
+service you run beside the application. The sidecar evaluates the Rails chosen
+for that deployment and sends records to your workspace.
 
-`Observe` remains advisory even when a deployment is switched to Enforce.
-Use `Enforce` at a protected function that owns provider credentials and has
-been reviewed for bypass paths. It stops before the effect unless the call is
-fresh, allowed, and centrally retained. It sends authenticated start and
-completion receipts, then checks the result before exposing it. A result
-block cannot undo an effect already completed.
+Start with **Observe** to see the decisions without changing your application's
+behavior. A denied check, unavailable sidecar, or recording failure does not
+stop an Observe callback. Use **Enforce** when you are ready to require permission
+before the callback and check its result before returning it. A result block
+cannot undo an effect already completed. A decision explains permission; an
+execution report says what your application reported doing. Neither
+independently proves a provider effect.
 
 ## Install and prepare
 
-Go 1.26 or newer is required.
+Prepare the AuthRail workspace before running an SDK check:
+
+1. Create an AuthRail account if you need one, then sign in and open your
+   organisation's workspace. You need access to manage its AI Inventory and
+   Runtime configuration; installing the SDK does not create this setup.
+2. Add or select the AI system in **AI Inventory** and confirm its identity.
+   Create and review the action it will request, including its input and
+   result fields. Keep that action's exact **Operation Version ID** for code.
+3. Publish the Rails for that action, then create an **Observe deployment**
+   using the reviewed AI system revision and exact Rail versions. A deployment
+   identifies the application setup whose decisions you want to track.
+4. Generate an Ed25519 application key pair using the commands under
+   [Observe an action](#observe-an-action). Register its public key on the
+   deployment; keep its private key in the protected application.
+5. Start the [AuthRail sidecar](https://github.com/AuthRail/authrail-sidecar#readme)
+   for that deployment. Docker is the recommended setup. Configure its
+   deployment credential, executor public key, separate adapter token and
+   private durable storage, then check its health.
+6. Derive the principal, session and optional resource ID from authenticated
+   application context, rather than model text.
+
+The SDK runs inside your Go program; the sidecar is a separate process.
+Building the SDK or your program does not start the sidecar. The local URL
+`http://127.0.0.1:7078` requires the application and sidecar to share a network
+namespace. With Docker, follow the sidecar guide for that arrangement; an
+unrelated container cannot reach the sidecar through its own loopback address. The **adapter
+token** lets the SDK call the sidecar locally; the **deployment credential**
+lets the sidecar connect to AuthRail. Keep these credentials, the application's
+private signing key and provider credentials outside the agent.
+
+Use Go 1.26 or newer. In your existing Go application's module directory:
 
 ```bash
-go get github.com/AuthRail/authrail-sdk-go
+go get github.com/AuthRail/authrail-sdk-go@main
 ```
 
-Before adding a check:
+If you are starting a new Go application, first create its directory and run
+`go mod init` with your application's module path. The command above resolves
+the current `main` source revision and records the resulting version in
+`go.mod` and `go.sum`; it does not start a service. To choose a reviewed revision
+explicitly, replace `main` with its commit SHA. These instructions use source
+revisions rather than assuming a stable tagged release.
 
-1. Review the action and its exact Operation Version in AuthRail.
-2. Register an Observe deployment and start its customer-side sidecar with a
-   deployment credential, private durable state, and separate adapter token.
-   Follow the [sidecar setup guide](https://github.com/AuthRail/authrail-sidecar#readme);
-   the SDK cannot evaluate Rails or deliver reports without it.
-3. Register the protected application's Ed25519 public key on that deployment.
-   Keep the private key and provider credentials outside the agent.
-4. Derive the principal, session, and optional resource ID from your
-   application's authenticated context, not from model text.
+To inspect or build the SDK source itself:
 
-Start with [Observe an action](#observe-an-action). Use
-[Discover a deployment](#discover-a-deployment) only when onboarding an AI
-system through a tenant-issued setup key. The later sections show how to add
-trusted session history, live source reads, and bounded AI-assisted facts.
-For a Node.js application, use the
+```bash
+git clone --branch main https://github.com/AuthRail/authrail-sdk-go.git
+cd authrail-sdk-go
+go build ./...
+```
+
+A successful build exits without starting a server. Start with
+[Observe an action](#observe-an-action) in your own program; its code examples
+use your existing business types and authenticated application context.
+[Discover a deployment](#discover-a-deployment) is an optional onboarding path
+through a short-lived setup key, rather than a substitute for the reviewed
+configuration above. For Node.js, use the
 [Node SDK](https://github.com/AuthRail/authrail-sdk-node) with the same sidecar.
+
+## Observe an action
+
+Generate a key pair in the protected application's environment, then register
+`executor-public.pem` on the deployment page:
+
+```bash
+umask 077
+openssl genpkey -algorithm Ed25519 -out executor-private.pem
+openssl pkey -in executor-private.pem -pubout -out executor-public.pem
+```
+
+Store the private key with your other application secrets and give only the
+public key to the sidecar and AuthRail. Load the private key before creating the
+client:
+
+```go
+privateKeyPEM, err := os.ReadFile(os.Getenv("AUTHRAIL_EXECUTOR_PRIVATE_KEY_FILE"))
+if err != nil { return err }
+executorPrivateKey, err := authrail.ParseExecutorPrivateKeyPEM(privateKeyPEM)
+if err != nil { return err }
+```
+
+Set up the client once in the protected application, then wrap the function you
+already use:
+
+```go
+client, err := authrail.NewClient(authrail.Config{
+    SidecarURL:   "http://127.0.0.1:7078",
+    AdapterToken: os.Getenv("AUTHRAIL_ADAPTER_TOKEN"),
+    OrganisationID: organisationID,
+    DeploymentID: deploymentID,
+    ExecutorPrivateKey: executorPrivateKey,
+})
+if err != nil { return err }
+
+receipt, checks, err := authrail.Observe(ctx, client, authrail.Operation{
+    VersionID: refundOperationVersionID,
+    ActionKey: refund.ID,
+    PrincipalID: currentStaff.ID,
+    PrincipalSource: "application_session",
+    SessionID: task.ID,
+    ResourceID: refund.InvoiceID,
+    ResourceSource: "application_lookup",
+}, refund, func(ctx context.Context) (Receipt, error) {
+    return payments.Refund(ctx, refund)
+})
+```
+
+`receipt` and `err` are the function's own result and error. The function runs
+once even if a Rail would deny it or the sidecar is unavailable. Read
+`<-checks` when you want the call and result decisions or an observation error;
+that check finishes separately and does not hold up the function's result.
+
+For example, after handling the function's own error, inspect the checks:
+
+```go
+observation := <-checks
+if observation.CallError != nil || observation.ResultError != nil {
+    log.Printf("AuthRail check unavailable: call=%v result=%v",
+        observation.CallError, observation.ResultError)
+} else {
+    log.Printf("AuthRail call=%s result=%s",
+        observation.CallDecision.Outcome, observation.ResultDecision.Outcome)
+}
+```
+
+Use Go's `log` package for this example. With a healthy Observe deployment,
+you receive decisions for both phases; their outcomes depend on your published
+Rails. `RecordingStatus == "retained"` means AuthRail stored the check;
+`"queued"` means the sidecar saved it for later delivery. Open the deployment's
+Runtime history in your workspace to inspect retained decisions. A failed
+check needs investigation, but still does not stop an Observe callback.
+
+The earlier snippet uses your application's `organisationID`, `deploymentID`,
+`refundOperationVersionID`, `currentStaff`, `task`, `refund`, `Receipt` and
+`payments` objects. Replace them with your own reviewed configuration and
+business types. It is integration code for your program, not a standalone
+server. The action contract must cover these fields and identities.
+
+The Operation Version comes from the reviewed action in AuthRail. Give each
+business action a stable `ActionKey` and reuse it on a retry. The SDK creates
+the request ID and JSON for you. Supply opaque principal and task/session IDs;
+use an opaque resource ID when the action targets one. AuthRail records these
+as references supplied by your application, without independently verifying
+the person or resource in Observe mode. `ExecutorPrivateKey` is an Ed25519
+private key held by your protected application. Give its PEM public key to the
+sidecar through `AUTHRAIL_EXECUTOR_PUBLIC_KEY_FILE`. The SDK signs each call and
+result check for 30 seconds; the sidecar rejects a changed, expired, or missing
+signature. Derive principal and resource IDs from your application's trusted
+session and resource lookup before calling `Observe`. Set `PrincipalSource` to
+`application_session` or `service_identity` based on that authentication. For an
+Operation with a resource identity field, use the exact ID in the reviewed
+argument and set `ResourceSource` to `application_lookup`. Otherwise leave
+`ResourceID` empty and set `ResourceSource` to `not_applicable`. Missing or
+mismatched claims make the local check unavailable, not an allow. These are
+signed application claims, not independent AuthRail verification of a person
+or record. Keep the signing key and
+adapter token with the protected
+application, away from the agent. The sidecar uses its own separate deployment
+credential to fetch Rails and report covered decisions to AuthRail. A decision's
+`RecordingStatus` is `retained`, `queued`, or `unavailable`. A queued report is
+saved by the sidecar for retry, but has no certificate yet. A retained response
+includes its Action and certificate IDs.
+
+Register the matching application public key on the deployment page before
+sending signed reports. AuthRail verifies the signature against that registered
+key when retaining a report, including one retried from the sidecar queue. A
+signed assertion proves that the application key supplied the references; your
+application still authenticates the person and resolves the resource.
 
 ## Enforce a protected action
 
@@ -160,89 +307,6 @@ give it to the agent.
 Add AuthRail checks at the Go function that performs an AI-requested action.
 Your application still runs the function. The SDK asks the nearby AuthRail
 sidecar what the selected Rails would decide about the call and its result.
-
-## Observe an action
-
-Generate a key pair in the protected application's environment, then register
-`executor-public.pem` on the deployment page:
-
-```bash
-openssl genpkey -algorithm Ed25519 -out executor-private.pem
-openssl pkey -in executor-private.pem -pubout -out executor-public.pem
-```
-
-Store the private key with your other application secrets and give only the
-public key to the sidecar and AuthRail. Load the private key before creating the
-client:
-
-```go
-privateKeyPEM, err := os.ReadFile(os.Getenv("AUTHRAIL_EXECUTOR_PRIVATE_KEY_FILE"))
-if err != nil { return err }
-executorPrivateKey, err := authrail.ParseExecutorPrivateKeyPEM(privateKeyPEM)
-if err != nil { return err }
-```
-
-Set up the client once in the protected application, then wrap the function you
-already use:
-
-```go
-client, err := authrail.NewClient(authrail.Config{
-    SidecarURL:   "http://127.0.0.1:7078",
-    AdapterToken: os.Getenv("AUTHRAIL_ADAPTER_TOKEN"),
-    OrganisationID: organisationID,
-    DeploymentID: deploymentID,
-    ExecutorPrivateKey: executorPrivateKey,
-})
-if err != nil { return err }
-
-receipt, checks, err := authrail.Observe(ctx, client, authrail.Operation{
-    VersionID: refundOperationVersionID,
-    ActionKey: refund.ID,
-    PrincipalID: currentStaff.ID,
-    PrincipalSource: "application_session",
-    SessionID: task.ID,
-    ResourceID: refund.InvoiceID,
-    ResourceSource: "application_lookup",
-}, refund, func(ctx context.Context) (Receipt, error) {
-    return payments.Refund(ctx, refund)
-})
-```
-
-`receipt` and `err` are the function's own result and error. The function runs
-once even if a Rail would deny it or the sidecar is unavailable. Read
-`<-checks` when you want the call and result decisions or an observation error;
-that check finishes separately and does not hold up the function's result.
-
-The Operation Version comes from the reviewed action in AuthRail. Give each
-business action a stable `ActionKey` and reuse it on a retry. The SDK creates
-the request ID and JSON for you. Supply opaque principal and task/session IDs;
-use an opaque resource ID when the action targets one. AuthRail records these
-as references supplied by your application, without independently verifying
-the person or resource in Observe mode. `ExecutorPrivateKey` is an Ed25519
-private key held by your protected application. Give its PEM public key to the
-sidecar through `AUTHRAIL_EXECUTOR_PUBLIC_KEY_FILE`. The SDK signs each call and
-result check for 30 seconds; the sidecar rejects a changed, expired, or missing
-signature. Derive principal and resource IDs from your application's trusted
-session and resource lookup before calling `Observe`. Set `PrincipalSource` to
-`application_session` or `service_identity` based on that authentication. For an
-Operation with a resource identity field, use the exact ID in the reviewed
-argument and set `ResourceSource` to `application_lookup`. Otherwise leave
-`ResourceID` empty and set `ResourceSource` to `not_applicable`. Missing or
-mismatched claims make the local check unavailable, not an allow. These are
-signed application claims, not independent AuthRail verification of a person
-or record. Keep the signing key and
-adapter token with the protected
-application, away from the agent. The sidecar uses its own separate deployment
-credential to fetch Rails and report covered decisions to AuthRail. A decision's
-`RecordingStatus` is `retained`, `queued`, or `unavailable`. A queued report is
-saved by the sidecar for retry, but has no certificate yet. A retained response
-includes its Action and certificate IDs.
-
-Register the matching application public key on the deployment page before
-sending signed reports. AuthRail verifies the signature against that registered
-key when retaining a report, including one retried from the sidecar queue. A
-signed assertion proves that the application key supplied the references; your
-application still authenticates the person and resolves the resource.
 
 ## Supply prior session reads
 
