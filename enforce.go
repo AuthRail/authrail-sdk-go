@@ -53,8 +53,8 @@ func (e *OutcomeUnknownError) Error() string {
 }
 func (e *OutcomeUnknownError) Unwrap() error { return e.Cause }
 
-// ApprovalRequired retains the original checked call in memory. A restart
-// requires application-owned recovery, not a blind permit claim or effect.
+// ApprovalRequired retains the original checked call in memory. Persist its
+// Continuation in protected application storage before crossing a restart.
 type ApprovalRequired struct {
 	Decision *Decision
 	client   *Client
@@ -64,6 +64,98 @@ type ApprovalRequired struct {
 }
 
 func (e *ApprovalRequired) Error() string { return "AuthRail approval is required" }
+
+// ApprovalContinuation retains an exact pending call and its retained decision.
+// Encrypt and scope it to the authenticated customer and operation in application
+// storage. It contains private arguments and must never be accepted from an agent.
+type ApprovalContinuation struct {
+	Call     Call     `json:"call"`
+	Decision Decision `json:"decision"`
+}
+
+// Continuation returns an independent snapshot for application-owned persistence.
+// Store it before claiming a permit so a lost response can use RecoverApprovalFrom.
+func (e *ApprovalRequired) Continuation() (ApprovalContinuation, error) {
+	if e == nil {
+		return ApprovalContinuation{}, errors.New("pending approval is missing")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.used || e.Decision == nil {
+		return ApprovalContinuation{}, errors.New("pending approval was consumed")
+	}
+	return freezeApprovalContinuation(ApprovalContinuation{Call: e.call, Decision: *e.Decision})
+}
+
+func freezeApprovalContinuation(value ApprovalContinuation) (ApprovalContinuation, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil || len(encoded) > 256*1024 {
+		return ApprovalContinuation{}, errors.New("approval continuation is invalid")
+	}
+	var frozen ApprovalContinuation
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if decoder.Decode(&frozen) != nil || !uuidPattern.MatchString(frozen.Call.RequestID) ||
+		!validEnforceOperation(Operation{VersionID: frozen.Call.OperationVersionID,
+			ActionKey: frozen.Call.ActionKey, PrincipalID: frozen.Call.PrincipalID,
+			SessionID: frozen.Call.SessionID, ResourceID: frozen.Call.ResourceID,
+			PrincipalSource: frozen.Call.PrincipalSource, ResourceSource: frozen.Call.ResourceSource,
+			ReviewSummary: frozen.Call.ReviewSummary, Traceparent: frozen.Call.Traceparent}) ||
+		!retainedApproval(&frozen.Decision) || frozen.Decision.RequestID != frozen.Call.RequestID {
+		return ApprovalContinuation{}, errors.New("approval continuation is invalid")
+	}
+	if _, err := callInputDigest(frozen.Call); err != nil {
+		return ApprovalContinuation{}, err
+	}
+	return frozen, nil
+}
+
+// ResumeApprovalFrom claims the original approved call after a request or process
+// boundary. An uncertain claim requires RecoverApprovalFrom, never a blind retry.
+func ResumeApprovalFrom[Input, Output any](ctx context.Context, client *Client,
+	continuation ApprovalContinuation,
+	execute func(context.Context, Input, ExecutionContext) (Output, error)) (Output, *Decision, error) {
+	return resumeApprovalFrom(ctx, client, continuation, false, execute)
+}
+
+// RecoverApprovalFrom reads only the exact existing unexpired, unstarted permit.
+// It never issues a replacement permit or retries an uncertain business effect.
+func RecoverApprovalFrom[Input, Output any](ctx context.Context, client *Client,
+	continuation ApprovalContinuation,
+	execute func(context.Context, Input, ExecutionContext) (Output, error)) (Output, *Decision, error) {
+	return resumeApprovalFrom(ctx, client, continuation, true, execute)
+}
+
+func resumeApprovalFrom[Input, Output any](ctx context.Context, client *Client,
+	continuation ApprovalContinuation, recoverExisting bool,
+	execute func(context.Context, Input, ExecutionContext) (Output, error)) (Output, *Decision, error) {
+	var zero Output
+	if client == nil || execute == nil {
+		return zero, nil, &EnforceBlockedError{Phase: "tool_call"}
+	}
+	frozen, err := freezeApprovalContinuation(continuation)
+	if err != nil {
+		return zero, nil, &EnforceBlockedError{Phase: "tool_call", Cause: err}
+	}
+	// Decode before consuming a permit; incompatible application input cannot
+	// become permission to invoke a callback with partially decoded arguments.
+	var input Input
+	if err := json.Unmarshal(frozen.Call.Arguments, &input); err != nil {
+		return zero, nil, &EnforceBlockedError{Phase: "tool_call", Cause: err}
+	}
+	permit, err := client.approvalPermit(ctx, frozen.Call, &frozen.Decision, recoverExisting)
+	if err != nil {
+		return zero, nil, &EnforceBlockedError{Phase: "tool_call", Decision: &frozen.Decision, Cause: err}
+	}
+	return executePermitted(ctx, client, frozen.Call, &frozen.Decision, &permit.PermitID, execute)
+}
+
+func retainedApproval(decision *Decision) bool {
+	return decision != nil && decision.Mode == "enforce" && !decision.Enforced &&
+		decision.Coverage == "evaluated" && decision.Outcome == "approval_required" &&
+		decision.RecordingStatus == "retained" && decision.ReportReplayed != nil && !*decision.ReportReplayed &&
+		uuidPattern.MatchString(decision.ActionID) && uuidPattern.MatchString(decision.ApprovalRequestID)
+}
 
 // ExecutionContext must be persisted with the provider request for recovery.
 type ExecutionContext = Recovery
@@ -103,9 +195,7 @@ func Enforce[Input, Output any](ctx context.Context, client *Client, operation O
 		return zero, nil, nil, &EnforceBlockedError{Phase: "tool_call", Cause: err}
 	}
 	if !permitted(decision) {
-		if decision.Outcome == "approval_required" && decision.RecordingStatus == "retained" &&
-			decision.ReportReplayed != nil && !*decision.ReportReplayed && uuidPattern.MatchString(decision.ActionID) &&
-			uuidPattern.MatchString(decision.ApprovalRequestID) {
+		if retainedApproval(decision) {
 			return zero, decision, nil, &ApprovalRequired{Decision: decision, client: client, call: call}
 		}
 		return zero, decision, nil, &EnforceBlockedError{Phase: "tool_call", Decision: decision}
@@ -285,6 +375,10 @@ type receiptResponse struct {
 }
 
 func (c *Client) claimApproval(ctx context.Context, call Call, decision *Decision) (permitResponse, error) {
+	return c.approvalPermit(ctx, call, decision, false)
+}
+
+func (c *Client) approvalPermit(ctx context.Context, call Call, decision *Decision, recoverExisting bool) (permitResponse, error) {
 	var permit permitResponse
 	if decision == nil || !uuidPattern.MatchString(decision.ActionID) || !uuidPattern.MatchString(decision.ApprovalRequestID) {
 		return permit, errors.New("retained approval request is required")
@@ -312,14 +406,18 @@ func (c *Client) claimApproval(ctx context.Context, call Call, decision *Decisio
 	if err != nil {
 		return permit, err
 	}
-	status, err := c.postLocal(ctx, "/approval-permits/claim", "", struct {
+	path, expectedStatus := "/approval-permits/claim", http.StatusCreated
+	if recoverExisting {
+		path, expectedStatus = "/approval-permits/recover", http.StatusOK
+	}
+	status, err := c.postLocal(ctx, path, "", struct {
 		ApprovalRequestID string        `json:"approvalRequestId"`
 		ActionID          string        `json:"actionId"`
 		InputSHA256       string        `json:"inputSha256"`
 		KeySHA256         string        `json:"keySha256"`
 		Proof             identityProof `json:"proof"`
 	}{decision.ApprovalRequestID, decision.ActionID, digest, keyDigest, proof}, &permit, call.Traceparent)
-	if err != nil || status != http.StatusCreated || !uuidPattern.MatchString(permit.PermitID) ||
+	if err != nil || status != expectedStatus || !uuidPattern.MatchString(permit.PermitID) ||
 		permit.ActionID != decision.ActionID || !permit.ExpiresAt.After(time.Now()) {
 		return permitResponse{}, errors.New("approval claim was unavailable or invalid")
 	}
@@ -431,7 +529,7 @@ func (c *Client) postLocal(ctx context.Context, path, idempotencyKey string, bod
 		return 0, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusAccepted {
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusAccepted {
 		return response.StatusCode, fmt.Errorf("sidecar returned HTTP %d", response.StatusCode)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 128*1024))

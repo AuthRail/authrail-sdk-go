@@ -101,8 +101,10 @@ func validDecisionLabel(value string) bool {
 	return true
 }
 
-// NewOpenAIDecisionsExtractor keeps document bytes in the protected executor.
-// The model returns one typed fact; ExtractContextFact still validates provenance and never delegates authorization.
+// NewOpenAIDecisionsExtractor sends the selected document bytes to OpenAI.
+// The caller must authorise and minimise that disclosure before invoking it;
+// this client does not redact protected content. The model supplies a typed fact,
+// never authorization, and ExtractContextFact validates its provenance.
 func NewOpenAIDecisionsExtractor(config OpenAIDecisionsConfig) (Extractor, error) {
 	digest, err := OpenAIDecisionsConfigSHA256(config.Question)
 	if err != nil {

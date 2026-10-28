@@ -84,11 +84,41 @@ mock provider ledger and one fixed test action key. Replace that key with a
 distinct stable business key for each real effect, and derive the caller from
 your authenticated application context.
 
-On `ApprovalRequired`,
-save the pending value while this process waits for a named human decision,
-then call `ResumeApproval` with the same protected operation. A process restart
-does not restore the in-memory pending callback. An uncertain claim must be
-reviewed before any new claim or effect.
+On `ApprovalRequired`, keep the pending value while this process waits for a
+named human decision, then call `ResumeApproval` with the original protected
+operation. For a workflow crossing a request or process boundary, call
+`pending.Continuation()` before claiming a permit. Encrypt and persist the
+returned `ApprovalContinuation` in application-owned storage, scoped to the
+authenticated user, organisation, deployment, Action and original business
+request. It contains private arguments, facts and session context; do not send
+it to an agent or accept a replacement supplied by an agent.
+
+```go
+var pending *authrail.ApprovalRequired
+if errors.As(err, &pending) {
+    continuation, snapshotErr := pending.Continuation()
+    if snapshotErr != nil { return snapshotErr }
+    // Encrypt and save json.Marshal(continuation) in your protected workflow store.
+    // After the named reviewer approves, restore it and supply the original executor:
+    // After restoring the continuation, ResumeApprovalFrom(ctx, client,
+    // continuation, payInvoice) returns the result, result decision, and error.
+}
+```
+
+A new client with the same deployment identity and executor key can resume
+the saved call. Resumption retains its processed input and attempt ID; it
+does not ask the model for replacement arguments or rerun call processors.
+The SDK does not persist this state or restore the callback for you. Named
+review needs the bounded application-supplied `Operation.ReviewSummary`; do
+not include secrets or raw payloads in that summary.
+
+If the permit claim response is lost, `RecoverApprovalFrom` uses the saved
+continuation to read only an existing, unexpired permit for that exact Action,
+input and executor. It never creates a second permit. An unavailable, expired,
+mismatched or already-started permit does not run the callback. Do not blindly
+retry a claim or effect. If a start receipt or provider outcome is uncertain,
+inspect the Action and reconcile the provider outcome before considering any
+new attempt.
 
 On `OutcomeUnknownError`, inspect its `Recovery` value and query the provider
 with the original idempotency key. Call `client.Reconcile` only after that
@@ -426,3 +456,30 @@ decision, and never rerun an operation to retry its receipt.
 Reporting is separate from execution and does not request a permit or change
 Observe's advisory decision. Keep the original call until report delivery is
 acknowledged; send only bounded references and exact input digests.
+
+## Validate the SDK source combination
+
+Run `go test -race ./...` for the Go SDK checks. With `authrail-sidecar` and
+`authrail-sdk-node` checked out beside this repository, Node dependencies
+installed, and Go module dependencies available, run:
+
+```sh
+sh scripts/check-sidecar.sh
+```
+
+This builds the Node SDK and connects both SDKs to the real sidecar HTTP
+handlers. The harness generates private temporary credentials and a signed
+Enforce bundle; it checks allowed call/result hooks, denied calls without an
+effect, JSON-persisted approval recovery and duplicate-start blocking. The
+fixture verifies the signed permit and receipt statements. It uses isolated
+loopback listeners and temporary state, then removes them. It never reads
+customer secrets, changes a running sidecar, calls a provider or uses tenant
+records.
+
+The control plane in this check is a fixture, so `retained` responses establish
+SDK/sidecar protocol translation only. Central persistence, human review,
+provider reconciliation, full interception, Docker recovery and release
+compatibility require their own connected verification. String Guard handlers
+do not establish isolation; source-read and extraction provenance remain
+protected-application assertions. Neither SDK automatically restores callbacks,
+persists application workflow state or retries a business effect.

@@ -186,8 +186,18 @@ func TestEnforceBlocksUnprovenStartAndUnknownOutcome(t *testing.T) {
 }
 
 func TestEnforceApprovalClaimIsSingleUse(t *testing.T) {
+	for _, resume := range []string{"memory", "persisted", "recover"} {
+		t.Run(resume, func(t *testing.T) { testApprovalResume(t, resume) })
+	}
+}
+
+// Restart recovery must preserve the processed input and original attempt,
+// and read an existing permit instead of issuing another permit after uncertainty.
+func testApprovalResume(t *testing.T, resume string) {
 	called := 0
 	processed := 0
+	var originalRequestID string
+	var permits []string
 	version := strings.Repeat("a", 64)
 	client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -204,17 +214,31 @@ func TestEnforceApprovalClaimIsSingleUse(t *testing.T) {
 				Phase     string `json:"phase"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&request)
+			if originalRequestID == "" {
+				originalRequestID = request.RequestID
+			} else if originalRequestID != request.RequestID {
+				t.Error("restart changed original call identity")
+			}
 			responseJSON(w, 200, map[string]any{"requestId": request.RequestID, "mode": "enforce", "enforced": false,
 				"coverage": "evaluated", "outcome": "approval_required", "recordingStatus": "retained",
 				"reportReplayed": false, "actionId": testActionID, "approvalRequestId": testApprovalID, "bundleId": testPermitID, "sequence": 1})
-		case "/approval-permits/claim":
-			responseJSON(w, 201, map[string]any{"permitId": testPermitID, "actionId": testActionID,
+		case "/approval-permits/claim", "/approval-permits/recover":
+			permits = append(permits, r.URL.Path)
+			status := http.StatusCreated
+			if r.URL.Path == "/approval-permits/recover" {
+				status = http.StatusOK
+			}
+			responseJSON(w, status, map[string]any{"permitId": testPermitID, "actionId": testActionID,
 				"expiresAt": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)})
 		case "/execution-receipts":
 			var receipt struct {
-				Event string `json:"event"`
+				Event     string `json:"event"`
+				AttemptID string `json:"attemptId"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&receipt)
+			if receipt.AttemptID != originalRequestID {
+				t.Error("restart changed execution attempt")
+			}
 			state := "succeeded"
 			if receipt.Event == "started" {
 				state = "executing"
@@ -234,16 +258,50 @@ func TestEnforceApprovalClaimIsSingleUse(t *testing.T) {
 	if !errors.As(err, &pending) || called != 0 {
 		t.Fatalf("approval should pause: %v", err)
 	}
-	_, _, err = ResumeApproval(context.Background(), pending,
-		func(_ context.Context, checked map[string]any, _ ExecutionContext) (map[string]any, error) {
-			called++
-			if checked["memo"] != "safe" {
-				t.Error("approval resumed unprocessed arguments")
-			}
-			return map[string]any{"ok": true}, nil
-		})
+	execute := func(_ context.Context, checked map[string]any, _ ExecutionContext) (map[string]any, error) {
+		called++
+		if checked["memo"] != "safe" {
+			t.Error("approval resumed unprocessed arguments")
+		}
+		return map[string]any{"ok": true}, nil
+	}
+	if resume == "memory" {
+		_, _, err = ResumeApproval(context.Background(), pending, execute)
+	} else {
+		continuation, snapshotErr := pending.Continuation()
+		if snapshotErr != nil {
+			t.Fatal(snapshotErr)
+		}
+		// Persisted data crosses a real JSON boundary and is loaded by a new client
+		// holding the same customer identity and executor key, with no pending map.
+		encoded, marshalErr := json.Marshal(continuation)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		var restored ApprovalContinuation
+		if err := json.Unmarshal(encoded, &restored); err != nil {
+			t.Fatal(err)
+		}
+		clientCopy := *client
+		pending = nil
+		if resume == "recover" {
+			_, _, err = RecoverApprovalFrom(context.Background(), &clientCopy, restored, execute)
+		} else {
+			_, _, err = ResumeApprovalFrom(context.Background(), &clientCopy, restored, execute)
+		}
+	}
 	if err != nil || called != 1 || processed != 1 {
 		t.Fatalf("approval did not resume: %v, %d", err, called)
+	}
+	if resume != "memory" {
+		want := "/approval-permits/claim"
+		if resume == "recover" {
+			want = "/approval-permits/recover"
+		}
+		if !reflect.DeepEqual(permits, []string{want}) {
+			t.Fatalf("unexpected permit paths: %v", permits)
+		}
+		return
 	}
 	_, _, err = ResumeApproval(context.Background(), pending,
 		func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
@@ -322,6 +380,76 @@ func TestClaimAndReceiptSignServerStatements(t *testing.T) {
 		if err != nil || !ed25519.Verify(key, []byte(statement), signature) {
 			t.Fatalf("%s signature does not match the server statement", request.path)
 		}
+	}
+}
+
+// A lost claim response is not permission: only the existing exact permit and
+// a fresh start acknowledgement may cross the business-effect boundary.
+func TestApprovalRestartRecoveryBlocksUnprovenPermitOrStart(t *testing.T) {
+	for _, failure := range []string{"unavailable", "wrong action", "expired", "duplicate start", "invalid continuation"} {
+		t.Run(failure, func(t *testing.T) {
+			var client *Client
+			requests, effects := 0, 0
+			client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.URL.Path == "/execution-receipts" {
+					responseJSON(w, 201, map[string]any{"receiptId": testPermitID, "state": "executing", "replayed": true})
+					return
+				}
+				if r.URL.Path != "/approval-permits/recover" {
+					t.Errorf("recovery attempted a new claim: %s", r.URL.Path)
+				}
+				var payload struct {
+					InputSHA256 string        `json:"inputSha256"`
+					KeySHA256   string        `json:"keySha256"`
+					Proof       identityProof `json:"proof"`
+				}
+				if json.NewDecoder(r.Body).Decode(&payload) != nil {
+					t.Fatal("invalid recovery proof")
+				}
+				statement := fmt.Sprintf(`{"type":"authrail.approval.claim.v1","organisationId":"%s","deploymentId":"%s","approvalRequestId":"%s","actionId":"%s","inputSha256":"%s","keySha256":"%s","issuedAt":%d,"expiresAt":%d}`,
+					client.organisationID, client.deploymentID, testApprovalID, testActionID, payload.InputSHA256,
+					payload.KeySHA256, payload.Proof.IssuedAt, payload.Proof.ExpiresAt)
+				signature, err := base64.RawURLEncoding.DecodeString(payload.Proof.Signature)
+				if err != nil || !ed25519.Verify(client.executorPrivateKey.Public().(ed25519.PublicKey), []byte(statement), signature) {
+					t.Error("recovery did not sign the existing protocol statement")
+				}
+				if failure == "unavailable" {
+					w.WriteHeader(503)
+					return
+				}
+				action, expires := testActionID, time.Now().Add(time.Minute)
+				if failure == "wrong action" {
+					action = testApprovalID
+				}
+				if failure == "expired" {
+					expires = time.Now().Add(-time.Minute)
+				}
+				responseJSON(w, 200, map[string]any{"permitId": testPermitID, "actionId": action, "expiresAt": expires.UTC().Format(time.RFC3339)})
+			})
+			defer closeServer()
+			op := enforceOperation()
+			replayed := false
+			continuation := ApprovalContinuation{Call: Call{RequestID: testApprovalID, OperationVersionID: op.VersionID,
+				ActionKey: op.ActionKey, PrincipalID: op.PrincipalID, SessionID: op.SessionID, ResourceID: op.ResourceID,
+				PrincipalSource: op.PrincipalSource, ResourceSource: op.ResourceSource, Arguments: json.RawMessage(`{"amount":400}`)},
+				Decision: Decision{RequestID: testApprovalID, Mode: "enforce", Coverage: "evaluated", Outcome: "approval_required",
+					RecordingStatus: "retained", ReportReplayed: &replayed, ActionID: testActionID, ApprovalRequestID: testApprovalID}}
+			if failure == "invalid continuation" {
+				continuation.Decision.Mode = "observe"
+			}
+			_, _, err := RecoverApprovalFrom(context.Background(), client, continuation,
+				func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+					effects++
+					return map[string]any{}, nil
+				})
+			if err == nil || effects != 0 {
+				t.Fatalf("unproven recovery ran callback: err=%v effects=%d", err, effects)
+			}
+			if failure == "invalid continuation" && requests != 0 {
+				t.Fatal("invalid continuation reached sidecar")
+			}
+		})
 	}
 }
 
