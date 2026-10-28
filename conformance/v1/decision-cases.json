@@ -1,0 +1,14 @@
+{
+  "formatVersion": 1,
+  "description": "Language-neutral Enforce call decisions. A protected effect runs only on a fresh retained allow.",
+  "cases": [
+    { "name": "fresh retained allow", "mode": "enforce", "coverage": "evaluated", "outcome": "allow", "recordingStatus": "retained", "reportReplayed": false, "effectRuns": true },
+    { "name": "denied", "mode": "enforce", "coverage": "evaluated", "outcome": "deny", "recordingStatus": "retained", "reportReplayed": false, "effectRuns": false },
+    { "name": "approval wait", "mode": "enforce", "coverage": "evaluated", "outcome": "approval_required", "recordingStatus": "retained", "reportReplayed": false, "effectRuns": false },
+    { "name": "uncovered", "mode": "enforce", "coverage": "uncovered", "outcome": "allow", "recordingStatus": "retained", "reportReplayed": false, "effectRuns": false },
+    { "name": "queued", "mode": "enforce", "coverage": "evaluated", "outcome": "allow", "recordingStatus": "queued", "reportReplayed": false, "effectRuns": false },
+    { "name": "replayed", "mode": "enforce", "coverage": "evaluated", "outcome": "allow", "recordingStatus": "retained", "reportReplayed": true, "effectRuns": false },
+    { "name": "missing replay proof", "mode": "enforce", "coverage": "evaluated", "outcome": "allow", "recordingStatus": "retained", "effectRuns": false },
+    { "name": "observe decision", "mode": "observe", "coverage": "evaluated", "outcome": "allow", "recordingStatus": "retained", "reportReplayed": false, "effectRuns": false }
+  ]
+}
