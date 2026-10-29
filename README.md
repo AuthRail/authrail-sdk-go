@@ -547,3 +547,16 @@ compatibility require their own connected verification. String Guard handlers
 do not establish isolation; source-read and extraction provenance remain
 protected-application assertions. Neither SDK automatically restores callbacks,
 persists application workflow state or retries a business effect.
+
+## Continuous integration
+
+SDK CI runs on pull requests and pushes to main and the existing feature branch.
+It checks Go formatting, `go vet`, and tests with the race detector. It also
+compiles an independent consumer against the committed source archive; run
+`sh scripts/check-package.sh` to check that locally. This checks packaging before
+a version tag exists; installation through the Go module proxy is checked at release.
+
+A separate job checks this candidate with pinned Node SDK and sidecar commits,
+using the actual sidecar handlers and disposable local state. Its signed
+control-plane fixture does not prove tenant persistence or provider effects.
+It needs no deployment secrets. CI does not create release tags.
