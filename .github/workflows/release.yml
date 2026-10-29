@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version, without v prefix'
+        required: true
+        default: '0.1.0'
+        type: string
+      publish:
+        description: 'Publish after checks (requires matching tag and publisher setup)'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main' && github.repository == 'AuthRail/authrail-sdk-go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.verify.outputs.sha }}
+      version: ${{ steps.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Verify version and release identity
+        id: verify
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          python - <<'PYCODE'
+          import json, os, re, subprocess
+          version = os.environ['RELEASE_VERSION']
+          if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
+              raise SystemExit('Use an exact MAJOR.MINOR.PATCH version.')
+          assert 'module github.com/AuthRail/authrail-sdk-go' in open('go.mod').read()
+          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          subprocess.run(['git', 'merge-base', '--is-ancestor', sha, 'origin/main'], check=True)
+          if os.environ['PUBLISH'] == 'true':
+              tagged = subprocess.check_output(['git', 'rev-parse', '--verify', f'refs/tags/v{version}' + '^{commit}'], text=True).strip()
+              if tagged != sha:
+                  raise SystemExit('The release tag must already point to this exact main commit.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'sha={sha}\nversion={version}\n')
+          PYCODE
+
+  checks:
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    needs: [prepare, checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: sh scripts/check-package.sh
+      - name: Preserve reviewed source archive
+        run: |
+          mkdir release
+          git archive --format=tar.gz --output=release/authrail-sdk-go-source.tar.gz HEAD
+          cd release
+          sha256sum *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-package
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: inputs.publish
+    needs: [prepare, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-package
+          path: release
+      - name: Verify tag availability through Go tooling and create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cd release
+          sha256sum -c SHA256SUMS
+          GOPROXY=https://proxy.golang.org go mod download -json "github.com/AuthRail/authrail-sdk-go@v$VERSION"
+          gh release create "v$VERSION" --verify-tag --title "v$VERSION" \
+            --notes 'AuthRail Go Runtime adapter. See the README for setup and the compatibility guide for tested sidecar versions.' \
+            authrail-sdk-go-source.tar.gz SHA256SUMS
