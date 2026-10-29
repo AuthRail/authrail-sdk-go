@@ -560,3 +560,5 @@ A separate job checks this candidate with pinned Node SDK and sidecar commits,
 using the actual sidecar handlers and disposable local state. Its signed
 control-plane fixture does not prove tenant persistence or provider effects.
 It needs no deployment secrets. CI does not create release tags.
+
+Maintainers: see [Releasing](RELEASING.md) for checked artifacts and publication setup.
