@@ -1,46 +1,48 @@
 # Releasing
 
-This guide is for maintainers. Public setup remains in the README. The initial
-release version is **0.1.0**. Preparing a release does not publish it.
+This guide is for maintainers. Public installation instructions are in the README.
+The coordinated documentation refresh targets **0.1.1**; published versions are
+immutable, so never move a released tag or replace an existing package.
 
 ## Check a candidate
 
-After the release preparation has merged, run the **Release** workflow from
-`main`, with version `0.1.0` and **publish unchecked**:
+Run the **Release** workflow from `main` with publishing disabled:
 
 ```sh
-gh workflow run release.yml --ref main -f version=0.1.0 -F publish=false
+gh workflow run release.yml --ref main -f version=0.1.1 -F publish=false
 ```
 
-The workflow runs CI, builds the distributions and retains reviewable artifacts
-for 14 days. Open its run in Actions, check every job, and download the artifacts.
-These artifacts are temporary review downloads, not public releases.
+The workflow runs CI and builds reviewable artifacts, retained for 14 days.
+Inspect the run and download its artifacts. Checksum files accompany them.
+These temporary artifacts are not registry releases.
 
-## Before publishing
+## Publish a checked version
 
-Complete the connected release checks, confirm the exact main commit and tested
-sidecar/SDK combination, and obtain the owner's release approval. Create only
-that approved `v0.1.0` tag; never move a published tag. The publish workflow
-requires the tag to point to the exact main commit being run. An intervening
-main commit requires reviewing the release identity again.
+Confirm the release commit and tested SDK/sidecar combination, and create the
+matching `v0.1.1` tag at that exact main commit. The workflow rejects a missing or
+mismatched tag. Its publishing environment allows only `main`.
 
-Configure the GitHub environment below with the owner as a required reviewer
-and deployment branches restricted to `main`. Publishing is a separate manual
-Release workflow run with **publish checked**. A pull request, ordinary push
-or check-only run cannot publish.
+```sh
+gh workflow run release.yml --ref main -f version=0.1.1 -F publish=true
+```
 
-## Go setup
+An explicit publish run automatically follows successful CI with publishing.
+There is no additional GitHub reviewer approval. Pull requests, ordinary pushes
+and check-only runs do not publish. Inspect both registry availability and the
+GitHub release afterward; do not blindly repeat a partially completed upload.
 
-Use GitHub environment **release**. There is no separate Go publisher account.
+## Go
+
+Module: [github.com/AuthRail/authrail-sdk-go](https://pkg.go.dev/github.com/AuthRail/authrail-sdk-go).
+GitHub environment: **release**. There is no separate Go publisher account.
 Pushing the version tag makes the module available to Go tooling, so tag creation
-is itself a publication step and needs release approval.
+is itself a publication step. The workflow never creates or moves tags.
 
-The check-only artifact is a source archive compiled by an independent consumer.
-After the approved tag exists, the publish job checks that version through the
-public Go proxy, verifies the archive checksum and creates a GitHub release.
-It never creates or moves the tag for you.
+The check-only run builds a source archive and compiles an independent consumer.
+After the tag exists, the publish run checks that version through the public Go
+proxy and creates its GitHub release.
 
-Verify `go get github.com/AuthRail/authrail-sdk-go@v0.1.0` in an empty module and
-exercise the connected Runtime flow before updating the public install guide.
+Verify `go get github.com/AuthRail/authrail-sdk-go@v0.1.1` in an empty module and
+exercise the connected Runtime flow.
 
 [Publishing Go modules](https://go.dev/doc/modules/publishing)
