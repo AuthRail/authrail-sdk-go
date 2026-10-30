@@ -56,26 +56,29 @@ token** lets the SDK call the sidecar locally; the **deployment credential**
 lets the sidecar connect to AuthRail. Keep these credentials, the application's
 private signing key and provider credentials outside the agent.
 
-Use Go 1.26 or newer. In your existing Go application's module directory:
+Use Go 1.26 or newer. In your application's module directory, install the
+[versioned module](https://pkg.go.dev/github.com/AuthRail/authrail-sdk-go):
 
 ```bash
-go get github.com/AuthRail/authrail-sdk-go@main
+go get github.com/AuthRail/authrail-sdk-go@v0.1.1
 ```
 
-If you are starting a new Go application, first create its directory and run
-`go mod init` with your application's module path. The command above resolves
-the current `main` source revision and records the resulting version in
-`go.mod` and `go.sum`; it does not start a service. To choose a reviewed revision
-explicitly, replace `main` with its commit SHA. These instructions use source
-revisions rather than assuming a stable tagged release.
+If you are starting a new application, first create its directory and run
+`go mod init` with your application's module path. `go get` records the SDK in
+`go.mod` and `go.sum`; it does not start a service. The
+[v0.1.1 source tag](https://github.com/AuthRail/authrail-sdk-go/tree/v0.1.1)
+identifies this version.
 
-To inspect or build the SDK source itself:
+<details>
+<summary>Build from source when contributing</summary>
 
 ```bash
-git clone --branch main https://github.com/AuthRail/authrail-sdk-go.git
+git clone https://github.com/AuthRail/authrail-sdk-go.git
 cd authrail-sdk-go
 go build ./...
 ```
+
+</details>
 
 A successful build exits without starting a server. Start with
 [Observe an action](#observe-an-action) in your own program; its code examples
@@ -554,7 +557,7 @@ SDK CI runs on pull requests and pushes to main and the existing feature branch.
 It checks Go formatting, `go vet`, and tests with the race detector. It also
 compiles an independent consumer against the committed source archive; run
 `sh scripts/check-package.sh` to check that locally. This checks packaging before
-a version tag exists; installation through the Go module proxy is checked at release.
+each version is published; installation through the Go module proxy is checked at release.
 
 A separate job checks this candidate with pinned Node SDK and sidecar commits,
 using the actual sidecar handlers and disposable local state. Its signed
