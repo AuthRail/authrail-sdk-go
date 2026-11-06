@@ -317,6 +317,10 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 	if call.ReviewSummary != nil && expectedMode != "enforce" {
 		return nil, errors.New("review summary requires an Enforce call")
 	}
+	findings, err := c.readContextual(ctx, call, phase, result)
+	if err != nil {
+		return nil, err
+	}
 	proof, err := c.signIdentityProof(call, phase, result)
 	if err != nil {
 		return nil, err
@@ -331,14 +335,16 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 		FactResolutions    []FactResolution    `json:"factResolutions,omitempty"`
 		Trajectory         *TrajectorySnapshot `json:"trajectory,omitempty"`
 		GuardEvidence      []GuardEvidence     `json:"guardEvidence,omitempty"`
+		ContextualFindings []contextualFinding `json:"contextualFindings,omitempty"`
 		ReviewSummary      *ReviewSummary      `json:"reviewSummary,omitempty"`
 		Attribution        attribution         `json:"attribution"`
 		IdentityProof      identityProof       `json:"identityProof"`
 	}{FormatVersion: 1, RequestID: call.RequestID, OperationVersionID: call.OperationVersionID,
 		Phase: phase, Arguments: call.Arguments, Result: result,
-		FactResolutions: call.FactResolutions,
-		Trajectory:      call.Trajectory,
-		GuardEvidence:   call.GuardEvidence,
+		FactResolutions:    call.FactResolutions,
+		Trajectory:         call.Trajectory,
+		GuardEvidence:      call.GuardEvidence,
+		ContextualFindings: findings,
 		ReviewSummary: func() *ReviewSummary {
 			if phase == "tool_call" {
 				return call.ReviewSummary

@@ -30,7 +30,7 @@ func sampleCall() Call {
 func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 	var phases []string
 	var phaseMu sync.Mutex
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := legacySidecarServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/evaluate" ||
 			r.Header.Get("Authorization") != "Bearer abcdefghijklmnopqrstuvwxyz012345" ||
 			r.Header.Get("Idempotency-Key") != "invoice-123" {
@@ -105,7 +105,7 @@ func TestObserveSendsResultAfterCallCheck(t *testing.T) {
 	callStarted := make(chan struct{})
 	releaseCall := make(chan struct{})
 	resultStarted := make(chan struct{}, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	server := legacySidecarServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var body struct {
 			Phase string `json:"phase"`
 		}
@@ -151,7 +151,7 @@ func TestObserveSendsResultAfterCallCheck(t *testing.T) {
 }
 
 func TestObserveKeepsToolBehaviorWhenSidecarUnavailable(t *testing.T) {
-	server := httptest.NewServer(http.NotFoundHandler())
+	server := legacySidecarServer(http.NotFoundHandler())
 	url := server.URL
 	server.Close()
 	client, err := NewClient(testConfig(url))
@@ -197,7 +197,7 @@ func TestObserveFreezesSignedContextBeforeAsyncChecks(t *testing.T) {
 
 func TestObserveDoesNotWaitForSidecar(t *testing.T) {
 	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := legacySidecarServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-release
 		_ = json.NewEncoder(w).Encode(map[string]any{"requestId": sampleCall().RequestID,
 			"mode": "observe", "enforced": false, "coverage": "uncovered", "outcome": "indeterminate"})
@@ -230,7 +230,7 @@ func TestClientRejectsRemoteSidecar(t *testing.T) {
 
 func TestTypedObserveKeepsGoValuesAndGeneratesRequestID(t *testing.T) {
 	seenIDs := make(chan string, 2)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := legacySidecarServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			RequestID string `json:"requestId"`
 		}
@@ -292,4 +292,15 @@ func TestInvalidOperationStillRunsTool(t *testing.T) {
 	if toolError != nil || result != 42 || count != 1 || observed.CallError == nil {
 		t.Fatalf("invalid Operation blocked the tool: result=%d observed=%+v err=%v", result, observed, toolError)
 	}
+}
+
+// Legacy fixtures model released sidecars without the contextual discovery route.
+func legacySidecarServer(handler http.Handler) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/contextual-requirements" {
+			http.NotFound(w, r)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
 }

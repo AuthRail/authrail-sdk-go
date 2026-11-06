@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -54,7 +53,7 @@ func enforceFixture(t *testing.T, handler http.HandlerFunc, handlers ...GuardHan
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(handler)
+	server := legacySidecarServer(handler)
 	client, err := NewClient(Config{SidecarURL: server.URL,
 		AdapterToken:       "adapter-token-123456789012345678901234567890",
 		OrganisationID:     "44444444-4444-4444-8444-444444444444",
