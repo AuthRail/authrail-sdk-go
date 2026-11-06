@@ -53,7 +53,17 @@ func enforceFixture(t *testing.T, handler http.HandlerFunc, handlers ...GuardHan
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := legacySidecarServer(handler)
+	server := legacySidecarServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Receipt-focused fixtures have no processing rules, but still model a
+		// reviewed plan and the same bundle used by their decisions.
+		if len(handlers) == 0 && r.URL.Path == "/guard-requirements" {
+			responseJSON(w, 200, guardPlan{FormatVersion: 1,
+				OperationVersionID: r.URL.Query().Get("operationVersionId"), Phase: r.URL.Query().Get("phase"),
+				BundleID: testPermitID, Sequence: 1, Coverage: "evaluated", Requirements: []GuardRequirement{}})
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
 	client, err := NewClient(Config{SidecarURL: server.URL,
 		AdapterToken:       "adapter-token-123456789012345678901234567890",
 		OrganisationID:     "44444444-4444-4444-8444-444444444444",
@@ -74,6 +84,9 @@ func enforceOperation() Operation {
 }
 
 func responseJSON(w http.ResponseWriter, status int, value any) {
+	if decision, ok := value.(map[string]any); ok && decision["requestId"] != nil && decision["bundleId"] == nil {
+		decision["bundleId"], decision["sequence"] = testPermitID, 1
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)

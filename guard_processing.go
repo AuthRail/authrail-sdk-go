@@ -92,13 +92,13 @@ func registeredGuardHandlers(handlers []GuardHandler) ([]GuardHandler, error) {
 	seen := make(map[string]bool)
 	for _, handler := range handlers {
 		key := handler.Kind + ":" + handler.ID + ":" + handler.Version
-		if !guardIdentifier.MatchString(handler.ID) || !digestPattern.MatchString(handler.Version) ||
+		if handler.ID == credentialRedactionHandlerID || !guardIdentifier.MatchString(handler.ID) || !digestPattern.MatchString(handler.Version) ||
 			(handler.Kind != "sanitize" && handler.Kind != "transform") || handler.Process == nil || seen[key] {
 			return nil, errors.New("Guard handler registration is invalid")
 		}
 		seen[key] = true
 	}
-	return append([]GuardHandler(nil), handlers...), nil
+	return append([]GuardHandler{credentialRedactionHandler()}, handlers...), nil
 }
 
 func (c *Client) guardRequirements(ctx context.Context, call Call, phase string) (guardPlan, error) {
