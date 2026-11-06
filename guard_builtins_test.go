@@ -144,3 +144,91 @@ func TestEnforceBuiltinRedactsCallAndResultWithoutRegistration(t *testing.T) {
 		t.Fatalf("automatic built-in processing failed: %v, plans=%d checks=%d", err, plans, checks)
 	}
 }
+
+// The exact reviewed target is processed; invalid or unsupported formats stay
+// unchanged, and application code cannot replace a reserved implementation.
+func TestSensitiveDataBuiltinProcessing(t *testing.T) {
+	cases := []struct {
+		text        string
+		email, card bool
+	}{
+		{"Contact jane.doe+test@example.co.uk.", true, false}, {"a@EXAMPLE.COM", true, false},
+		{"a..b@example.com", false, false}, {"a.@example.com", false, false}, {"a@example.c", false, false},
+		{"_name@example.com", false, false}, {"name@example.com_", false, false},
+		{strings.Repeat("a", 65) + "@example.com", false, false},
+		{"Card 4111 1111 1111 1111.", false, true}, {"378282246310005", false, true},
+		{"4242-4242-4242-4242", false, true}, {"4111111111111112", false, false},
+		{"0000000000000000", false, false}, {"41111111111111111111", false, false},
+		{"４１１１１１１１１１１１１１１１", false, false}, {"ordinary reply", false, false},
+	}
+	handlers, err := registeredGuardHandlers(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range cases {
+		if emailAddressV1(sample.text) != sample.email || paymentCardV1(sample.text) != sample.card {
+			t.Fatalf("sensitive-data classification mismatch for %q", sample.text)
+		}
+		for _, handler := range handlers {
+			expected := sample.text
+			if handler.ID == emailRedactionHandlerID && sample.email || handler.ID == paymentCardRedactionHandlerID && sample.card {
+				expected = "[REDACTED]"
+			}
+			if handler.ID == fieldWithholdingHandlerID {
+				expected = "[WITHHELD]"
+			}
+			output, err := handler.Process(context.Background(), sample.text)
+			if err != nil || output != expected {
+				t.Fatal("reserved processor did not apply the reviewed whole-field transformation")
+			}
+		}
+	}
+	for _, id := range []string{emailRedactionHandlerID, paymentCardRedactionHandlerID, fieldWithholdingHandlerID} {
+		if _, err := registeredGuardHandlers([]GuardHandler{{ID: id, Version: strings.Repeat("f", 64), Kind: "sanitize", Process: func(_ context.Context, text string) (string, error) { return text, nil }}}); err == nil {
+			t.Fatal("reserved sensitive-data processor was replaced")
+		}
+	}
+}
+
+func TestSensitiveDataPlanBindsExactWholeFieldOutput(t *testing.T) {
+	for _, example := range []struct{ id, version, input, output string }{
+		{emailRedactionHandlerID, emailRedactionHandlerVersion, "reply to jane@example.com", "[REDACTED]"},
+		{paymentCardRedactionHandlerID, paymentCardRedactionHandlerVersion, "4111 1111 1111 1111", "[REDACTED]"},
+		{fieldWithholdingHandlerID, fieldWithholdingHandlerVersion, "arbitrary private content", "[WITHHELD]"},
+	} {
+		t.Run(example.id, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				phase := r.URL.Query().Get("phase")
+				root := "arguments"
+				if phase == "tool_result" {
+					root = "result"
+				}
+				responseJSON(w, 200, guardPlan{FormatVersion: 1, OperationVersionID: enforceOperation().VersionID, Phase: phase, BundleID: testPermitID, Sequence: 1, Coverage: "evaluated", Requirements: []GuardRequirement{{RailVersionID: testActionID, RuleID: "protect", Kind: "sanitize", HandlerID: example.id, HandlerVersion: example.version, Target: GuardTarget{Root: root, Path: []string{"text"}}}}})
+			}))
+			defer server.Close()
+			client, err := NewClient(testConfig(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(map[string]any{"text": example.input, "kept": true})
+			for _, phase := range []string{"tool_call", "tool_result"} {
+				call := Call{OperationVersionID: enforceOperation().VersionID, Arguments: raw}
+				processed, result, err := client.processGuardPhase(context.Background(), call, phase, raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				output := processed.Arguments
+				if phase == "tool_result" {
+					output = result
+				}
+				var value map[string]any
+				if json.Unmarshal(output, &value) != nil || value["text"] != example.output || value["kept"] != true {
+					t.Fatal("processed plan released the wrong field value")
+				}
+				if len(processed.GuardEvidence) != 1 || processed.GuardEvidence[0].InputSHA256 != guardStringDigest(example.input) || processed.GuardEvidence[0].OutputSHA256 != guardStringDigest(example.output) {
+					t.Fatal("processing proof lost exact input/output binding")
+				}
+			}
+		})
+	}
+}
