@@ -190,6 +190,10 @@ func Enforce[Input, Output any](ctx context.Context, client *Client, operation O
 	if err != nil {
 		return zero, nil, nil, &EnforceBlockedError{Phase: "tool_call", Cause: err}
 	}
+	call, err = client.prepareDataCall(ctx, call, "tool_call")
+	if err != nil {
+		return zero, nil, nil, &EnforceBlockedError{Phase: "tool_call", Cause: err}
+	}
 	decision, err := client.evaluate(ctx, call, "tool_call", "enforce", nil)
 	if err != nil {
 		return zero, nil, nil, &EnforceBlockedError{Phase: "tool_call", Cause: err}

@@ -36,6 +36,7 @@ type Client struct {
 	executorPrivateKey ed25519.PrivateKey
 	clock              func() time.Time
 	guardHandlers      []GuardHandler
+	dataSources        []DataSourceBinding
 }
 
 // Config binds one protected application to its local sidecar and signing key.
@@ -49,6 +50,8 @@ type Config struct {
 	ExecutorPrivateKey ed25519.PrivateKey
 	// GuardHandlers run only during Enforce, at exact reviewed string targets.
 	GuardHandlers []GuardHandler
+	// DataSources opts into automatic reviewed reads; nil preserves manual facts.
+	DataSources []DataSourceBinding
 }
 
 // Operation identifies the reviewed action and a stable key from the workflow.
@@ -95,6 +98,9 @@ type Call struct {
 	GuardEvidence      []GuardEvidence
 	guardBundleID      string
 	guardSequence      int64
+	dataBundleID       string
+	dataSequence       int64
+	dataPhase          string
 }
 
 type attribution struct {
@@ -161,6 +167,10 @@ func NewClient(config Config) (*Client, error) {
 	if subtle.ConstantTimeCompare(derived, config.ExecutorPrivateKey) != 1 {
 		return nil, errors.New("executor signing key is invalid")
 	}
+	sources, err := registerDataSources(config.DataSources)
+	if err != nil {
+		return nil, err
+	}
 	handlers, err := registeredGuardHandlers(config.GuardHandlers)
 	if err != nil {
 		return nil, err
@@ -177,7 +187,7 @@ func NewClient(config Config) (*Client, error) {
 	return &Client{endpoint: strings.TrimRight(config.SidecarURL, "/") + "/evaluate", token: config.AdapterToken, http: &copyClient,
 		organisationID: config.OrganisationID, deploymentID: config.DeploymentID,
 		executorPrivateKey: append(ed25519.PrivateKey(nil), config.ExecutorPrivateKey...),
-		clock:              time.Now, guardHandlers: handlers}, nil
+		clock:              time.Now, guardHandlers: handlers, dataSources: sources}, nil
 }
 
 // Observe wraps a function while preserving its Go result and error. The
@@ -258,6 +268,13 @@ func (c *Client) observeRaw(ctx context.Context, call Call,
 	callCheck := make(chan Observation, 1)
 	callDone := make(chan struct{})
 	go func() {
+		prepared, prepareErr := c.prepareDataCall(checkContext, call, "tool_call")
+		if prepareErr != nil {
+			callCheck <- Observation{CallError: prepareErr}
+			close(callDone)
+			return
+		}
+		call = prepared
 		decision, err := c.evaluate(checkContext, call, "tool_call", "observe", nil)
 		callCheck <- Observation{CallDecision: decision, CallError: err}
 		close(callDone)
@@ -314,6 +331,13 @@ func newRequestID() (string, error) {
 }
 
 func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode string, result json.RawMessage) (*Decision, error) {
+	if c.dataSources != nil && call.dataPhase != phase {
+		var err error
+		call, err = c.prepareDataCall(ctx, call, phase)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if call.ReviewSummary != nil && expectedMode != "enforce" {
 		return nil, errors.New("review summary requires an Enforce call")
 	}
@@ -390,6 +414,9 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 	if expectedMode == "enforce" && call.guardBundleID != "" &&
 		(decision.BundleID == nil || *decision.BundleID != call.guardBundleID || decision.Sequence != call.guardSequence) {
 		return nil, errors.New("Guard requirements changed before evaluation")
+	}
+	if call.dataBundleID != "" && (decision.BundleID == nil || *decision.BundleID != call.dataBundleID || decision.Sequence != call.dataSequence) {
+		return nil, errors.New("Data source bundle changed")
 	}
 	return &decision, nil
 }
