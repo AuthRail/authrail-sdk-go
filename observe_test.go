@@ -27,6 +27,48 @@ func sampleCall() Call {
 		Arguments: json.RawMessage(`{"amount":101}`)}
 }
 
+// A delayed retention response must fit Enforce without extending Observe or a caller's limit.
+func TestEvaluationRecordingWaitAndCallerDeadlines(t *testing.T) {
+	server := legacySidecarServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(2500 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		var body struct {
+			RequestID string `json:"requestId"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"requestId": body.RequestID,
+			"mode": "enforce", "enforced": false, "coverage": "evaluated", "outcome": "allow"})
+	}))
+	defer server.Close()
+	client, err := NewClient(testConfig(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.evaluate(context.Background(), sampleCall(), "tool_call", "enforce", nil); err != nil {
+		t.Fatalf("Enforce cancelled before the retention window completed: %v", err)
+	}
+	if _, err := client.evaluate(context.Background(), sampleCall(), "tool_call", "observe", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Observe no longer respects its short deadline: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := client.evaluate(ctx, sampleCall(), "tool_call", "enforce", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("caller cancellation was extended: %v", err)
+	}
+	config := testConfig(server.URL)
+	config.HTTPClient = &http.Client{Timeout: 30 * time.Millisecond}
+	short, err := NewClient(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := short.evaluate(context.Background(), sampleCall(), "tool_call", "enforce", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("caller HTTP deadline was extended: %v", err)
+	}
+}
+
 func TestObserveChecksCallAndResultWithoutBlocking(t *testing.T) {
 	var phases []string
 	var phaseMu sync.Mutex

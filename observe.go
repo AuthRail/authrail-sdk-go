@@ -180,8 +180,8 @@ func NewClient(config Config) (*Client, error) {
 		transport = &http.Client{}
 	}
 	copyClient := *transport
-	if copyClient.Timeout == 0 || copyClient.Timeout > 2*time.Second {
-		copyClient.Timeout = 2 * time.Second
+	if copyClient.Timeout == 0 || copyClient.Timeout > 10*time.Second {
+		copyClient.Timeout = 10 * time.Second
 	}
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Client{endpoint: strings.TrimRight(config.SidecarURL, "/") + "/evaluate", token: config.AdapterToken, http: &copyClient,
@@ -381,7 +381,15 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 	if err != nil {
 		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	// Enforce waits for durable decision recording before any protected effect.
+	// Observe remains short-lived; a caller's earlier cancellation still wins.
+	timeout := 2 * time.Second
+	if expectedMode == "enforce" {
+		timeout = 10 * time.Second
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
