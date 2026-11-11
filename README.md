@@ -4,25 +4,44 @@
 
 # AuthRail Go SDK
 
-AuthRail helps you see what your AI agents are doing and set rules for the
-actions they may take. In your AuthRail workspace, you describe an action,
-publish its rules, and review the decisions and execution reports it produces.
-Those published rules are called **Rails**.
+AuthRail helps organisations control what connected AI agents may do and
+understand what happened when they acted. In the workspace, you describe an
+action, publish rules for it and review the decisions and completion reports.
+Those rules are called **Rails**.
 
-This SDK connects a Go application to AuthRail. Add it around the function
-that handles an AI-requested action, such as paying an invoice or posting a
-message. Your application keeps its business logic and provider credentials.
-The SDK checks the call and its result with an AuthRail **sidecar**: a small
-service you run beside the application. The sidecar evaluates the Rails chosen
-for that deployment and sends records to your workspace.
+This SDK connects a Go function to those Rails. For example, you can wrap an
+invoice reader so each agent request and returned invoice are checked by a
+**sidecar**, a small service running beside your application. The application
+keeps the business function and its provider credentials; the sidecar evaluates
+the selected rules and sends decision records to AuthRail.
 
-Start with **Observe** to see the decisions without changing your application's
-behavior. A denied check, unavailable sidecar, or recording failure does not
-stop an Observe callback. Use **Enforce** when you are ready to require permission
-before the callback and check its result before returning it. A result block
-cannot undo an effect already completed. A decision explains permission; an
-execution report says what your application reported doing. Neither
-independently proves a provider effect.
+Start in **Observe** to see how the rules apply while the function continues
+running. Switch to **Enforce** when the function should wait for permission;
+the SDK also checks its result before returning it to the agent. A decision
+explains permission, while a completion report describes what the application
+says it did. When an operation affects an external provider, check that provider’s
+record to establish its effect independently.
+
+[Documentation](https://docs.authrail.io) ·
+[Sidecar](https://github.com/AuthRail/authrail-sidecar) ·
+[Node.js SDK](https://github.com/AuthRail/authrail-sdk-node) ·
+[Go SDK](https://github.com/AuthRail/authrail-sdk-go) ·
+[Python SDK](https://github.com/AuthRail/authrail-sdk-python)
+
+## Choose a version
+
+The install command below selects SDK **0.1.1**, which supports Observe and
+Enforce, saved approval continuations, reconciliation, custom Guard handlers
+and explicit fact readers. The [first-application guide](https://docs.authrail.io/docs/getting-started)
+uses this release with a simple Policy Rail and a local invoice reader.
+
+Some sections below also describe newer repository source. Automatic
+Rail-owned Contextual AI, expanded built-in Guards and automatic Data reader
+bindings are not part of SDK 0.1.1. Check
+[compatibility](https://docs.authrail.io/docs/compatibility) before enabling those
+requirements. The setup executable and native Runtime are version **0.2.0**,
+while its Docker installer selects Runtime **0.1.0**; they have separate version
+identities.
 
 ## Install and prepare
 
@@ -30,22 +49,23 @@ Prepare the AuthRail workspace before running an SDK check:
 
 1. Create an AuthRail account if you need one, then sign in and open your
    organisation's workspace. You need access to manage its AI Inventory and
-   Runtime configuration; installing the SDK does not create this setup.
+   Runtime configuration. The
+   [first-application guide](https://docs.authrail.io/docs/getting-started) walks
+   through these workspace steps.
 2. Add or select the AI system in **AI Inventory** and confirm its identity.
    Create and review the action it will request, including its input and
-   result fields. Keep that action's exact **Operation Version ID** for code.
+   result fields. Copy its **Operation Version ID** for your code so the SDK refers to the
+   input and result description you confirmed.
 3. Publish the Rails for that action, then create an **Observe deployment**
-   using the reviewed AI system revision and exact Rail versions. A deployment
+   using the confirmed AI system and the published Rail versions. A deployment
    identifies the application setup whose decisions you want to track.
-4. Generate an Ed25519 application key pair using the commands under
-   [Observe an action](#observe-an-action). Register its public key on the
-   deployment; keep its private key in the protected application.
-5. Start the [AuthRail sidecar](https://github.com/AuthRail/authrail-sidecar#readme)
-   for that deployment. Docker is the recommended setup. Configure its
-   deployment credential, executor public key, separate adapter token and
-   private durable storage, then check its health.
-6. Derive the principal, session and optional resource ID from authenticated
-   application context, rather than model text.
+4. Run the [released sidecar's guided setup](https://docs.authrail.io/docs/native)
+   with the API address supplied by your installation administrator. Choose
+   Docker for a container application or native for a host application. Setup
+   saves the keys, tokens and SDK helper files privately and registers only
+   the public key with AuthRail.
+5. Get the caller, session and target record from your application’s
+   authentication and resource lookups, and keep the setup files private.
 
 The SDK runs inside your Go program; the sidecar is a separate process.
 Building the SDK or your program does not start the sidecar. The local URL
@@ -90,18 +110,10 @@ configuration above. For Node.js, use the
 
 ## Observe an action
 
-Generate a key pair in the protected application's environment, then register
-`executor-public.pem` on the deployment page:
-
-```bash
-umask 077
-openssl genpkey -algorithm Ed25519 -out executor-private.pem
-openssl pkey -in executor-private.pem -pubout -out executor-public.pem
-```
-
-Store the private key with your other application secrets and give only the
-public key to the sidecar and AuthRail. Load the private key before creating the
-client:
+Use the `executor-private.pem` and `adapter-token` saved by guided setup.
+Register only the public key; keep the private key with the protected application.
+For existing operator-managed installations, reuse the registered key instead
+of generating a replacement. Load the private key before creating the client:
 
 ```go
 privateKeyPEM, err := os.ReadFile(os.Getenv("AUTHRAIL_EXECUTOR_PRIVATE_KEY_FILE"))
@@ -184,9 +196,8 @@ argument and set `ResourceSource` to `application_lookup`. Otherwise leave
 `ResourceID` empty and set `ResourceSource` to `not_applicable`. Missing or
 mismatched claims make the local check unavailable, not an allow. These are
 signed application claims, not independent AuthRail verification of a person
-or record. Keep the signing key and
-adapter token with the protected
-application, away from the agent. The sidecar uses its own separate deployment
+or record. Keep the signing key and adapter token in the protected application, where
+the agent cannot read them. The sidecar uses its own separate deployment
 credential to fetch Rails and report covered decisions to AuthRail. A decision's
 `RecordingStatus` is `retained`, `queued`, or `unavailable`. A queued report is
 saved by the sidecar for retry, but has no certificate yet. A retained response
@@ -255,12 +266,12 @@ if errors.As(err, &pending) {
 }
 ```
 
-A new client with the same deployment identity and executor key can resume
-the saved call. Resumption retains its processed input and attempt ID; it
-does not ask the model for replacement arguments or rerun call processors.
-The SDK does not persist this state or restore the callback for you. Named
-review needs the bounded application-supplied `Operation.ReviewSummary`; do
-not include secrets or raw payloads in that summary.
+After a restart, create a client using the same deployment identity and key,
+restore the continuation and supply the original callback. Resumption keeps
+the processed input and attempt ID; your application stores that state and
+reconnects it to the worker that performs the work. Include an
+`Operation.ReviewSummary` with the few facts the named reviewer needs, while
+keeping secrets and raw payloads out of the summary.
 
 If the permit claim response is lost, `RecoverApprovalFrom` uses the saved
 continuation to read only an existing, unexpired permit for that exact Action,
@@ -272,8 +283,8 @@ new attempt.
 
 On `OutcomeUnknownError`, inspect its `Recovery` value and query the provider
 with the original idempotency key. Call `client.Reconcile` only after that
-lookup establishes success or no effect. Unknown is not failure and never
-permits a blind retry. A fresh attempt requires a new signed call decision and
+lookup establishes success or no effect. Until the provider outcome is established, leave it unknown and hold further
+attempts. A fresh attempt requires a new signed call decision and
 any newly required approval. The result hook reports a separate exposure
 decision; it cannot roll back a provider operation.
 
@@ -313,6 +324,11 @@ sidecar what the selected Rails would decide about the call and its result.
 
 ## Supply prior session reads
 
+Some Guard rules need the application to process a field before it is used;
+others check whether a required read happened earlier in the task. Both use
+information supplied by the protected application, rather than a claim in
+the agent’s conversation.
+
 For a Guard that requires string processing, register `Config.GuardHandlers`
 with its exact reviewed ID, SHA-256 version, kind (`sanitize` or `transform`),
 and a side-effect-free `Process(context.Context, string) (string, error)`.
@@ -325,8 +341,8 @@ continue locally; it must never perform business effects. Approval resumes
 reuse the processed call. Observe never runs processors. These assertions do
 not independently verify handler code or sandbox containment.
 
-For a Guard rule that checks an earlier read, the protected application may
-attach a `TrajectorySnapshot` to the Operation. Use the authenticated task's
+To describe earlier reads, attach a `TrajectorySnapshot` to the Operation.
+A trajectory is the relevant history of this authenticated task. Use the authenticated task's
 `SessionID`, and include only exact Operation Version IDs whose **result hook
 completed successfully** earlier in that task. Set `Complete: true` only when
 the application can account for the full relevant history; otherwise omit the
@@ -347,23 +363,27 @@ operation.Trajectory = &authrail.TrajectorySnapshot{
 }
 ```
 
-The SDK signs this bounded snapshot with each hook and sends the result check
-after the call check completes, without delaying the tool function. The sidecar
-keeps a private, bounded history of matching signed call and successful result
-hooks and checks exact ordered versions for the same principal and session.
-A missing, changed, incomplete, or unrecoverable history leaves the local check
-unavailable, not allowed. The application assertion is still not independent
-proof that every earlier read was intercepted: a bypassed hook is invisible.
-The SDK freezes the supplied context before asynchronous checks so later
-application mutations cannot change what was signed. `Values` may also
-carry small, typed session fields already reviewed
-on the exact Operation; unreviewed or wrongly typed fields are rejected. Do
-not put arbitrary conversation text or model output in `Values`. Do not use
-session fields to claim a prior business effect: a successful tool result
-check is not an authenticated execution receipt. Raw session
-history and values are not sent to AuthRail.
+The SDK copies the snapshot before starting asynchronous checks, so later
+application changes cannot alter its signed contents. The sidecar compares
+the ordered Operation Versions with its private history for the same caller
+and session. Missing, changed or incomplete history leaves the check
+unavailable. Because a read that bypassed the wrapper is invisible, this
+comparison still depends on the application placing checks at each required
+function.
+
+`Values` can carry small session fields whose names and types are defined on
+the Operation. Use those fields for application-established context, rather
+than arbitrary conversation text or model output. A completed result check
+can support read history, but does not establish that an earlier business
+effect occurred; execution reports serve that separate purpose. Raw session
+history and these values are not sent to AuthRail.
 
 ## Read a live fact in your protected application
+
+A Data Rail can use facts read by the application before the protected action.
+The source version defines which account, lookup and value it expects; the
+sidecar also checks freshness. Choose the reader for that source and bind its
+credentials in the protected application.
 
 `LookupStripeInvoiceStatus` supports a normal Stripe account by default. It
 first reads Stripe's current account with the application's credential and
@@ -377,8 +397,7 @@ give the Stripe credential to the agent.
 `LookupQuickBooksInvoiceBalance` reads one invoice from the reviewed
 QuickBooks Online realm with an application-owned OAuth access token. Set
 `Sandbox: true` only for an Intuit test company; otherwise it uses the fixed
-production host. The bounded result has `Invoice.Balance`, matching the
-reviewed Data Rail. A different invoice ID or invalid balance is `untrusted`;
+production host. The result contains `Invoice.Balance` for the Data Rail. A different invoice ID or invalid balance is `untrusted`;
 provider failure or a redirect is `unavailable`. Supply the exact realm,
 invoice ID, timeout, and Context Source Version from the reviewed contract,
 never from the agent. The application owns token acquisition and refresh; the
@@ -395,15 +414,15 @@ refresh tokens together before using them. Expired, revoked, or mismatched
 grants produce unavailable context and require reconnection. Keep tokens,
 OAuth codes, and provider response bodies away from the agent, sidecar, and
 AuthRail. Stripe keys also stay in that store, scoped to the reviewed account.
-The SDK consumes an application-supplied access token for one bounded read;
-it does not perform consent, persist tokens, or retry an effect.
+Your application supplies an access token for the read. It remains responsible
+for consent, token storage and refresh, while the SDK performs the lookup.
 
 `LookupCustomerFact` calls your named, read-only lookup with a bounded context.
-Your callback must honor cancellation, keep its database or API credential in
-the protected application, return the exact source, lookup, and account or
-tenant it read, and return the source observation time. The helper rejects a
-different source or account;
-it does not turn a cached result into a fresh one. Both helpers return the
+Your callback should honour cancellation and keep its database or API
+credential private. Return the source, lookup, account or tenant, and the time
+the value was observed. The helper checks that these match the configured
+source, and preserves the observation time so a cached value is not presented
+as newly read. Both helpers return the
 source version, lookup key, account, observation time, and bounded value for
 the local decision protocol. Configure them from the **exact reviewed Context
 Source Version**, not a copied endpoint or an agent-provided account ID.
@@ -449,29 +468,35 @@ does not stop the action.
 
 ## Use AuthRail Contextual AI
 
-Enable **AuthRail Contextual AI** on a Guard or Policy Rail when the rule needs
-to understand meaning: a code change that weakens authentication, confidential
-material in an export, or the purpose described in a payment justification.
-Describe the business rule and review the prepared question, permitted fields
-and answer before testing and publishing that exact Rail version.
+The integration in this section is available in current source, but not in
+published SDK 0.1.1. Choose a compatible released SDK and Runtime before using
+it in an installed application.
 
-The SDK handles the contextual request automatically during its normal call
-and result checks. It obtains the selected assessment from the local sidecar,
-selects only its permitted fields after required local processing, and sends
-them through the sidecar to AuthRail. AuthRail returns a signed bounded finding;
-the sidecar verifies its exact request, caller, material and Rail binding and
-applies the deterministic rule. You do not supply a model key, choose a model,
-write a prompt or initialise an extractor.
+Some rules need to understand meaning as well as compare values. For example,
+a release rule might ask whether a code change weakens authentication. Enable
+**AuthRail Contextual AI** on the Guard or Policy Rail, describe the rule and
+review the question, permitted fields and answer that AuthRail prepares. Test
+those choices before publishing the Rail.
 
-With the setting off, that Rail sends no contextual request. Missing material,
-uncertainty or an unavailable service never becomes a made-up answer. Contextual
-AI cannot replace a trusted balance lookup, fix missing identity, override a
-denial or supply a required human approval.
+During a call or result check, the SDK obtains that assessment from the sidecar,
+applies any required local processing and selects the permitted material. It
+sends that material through the sidecar to AuthRail for interpretation. AuthRail
+returns a signed finding, which the sidecar verifies against the request,
+caller, material and Rail version before using it in the rule. AuthRail operates
+the interpretation service, so your application does not need model credentials,
+a prompt or a separately configured extractor.
 
-AuthRail receives the selected material for transient processing. It is not
-added to normal logs, traces or retained Actions; those retain the assessment
-status and bounded finding. Review permitted disclosure before publishing.
-See [Contextual AI](https://docs.authrail.io/docs/facts) for the full flow.
+If Contextual AI is off for the Rail, it sends no contextual request. If the
+assessment is uncertain, material is missing or the service is unavailable, the
+rule cannot pass using an invented answer. Ordinary authentication, data lookups
+and human approval still apply; interpretation supplies information to a rule,
+not permission to perform the action.
+
+Review disclosure before publication because AuthRail receives the selected
+material for transient processing. Normal Actions, logs and traces exclude that
+material and retain the assessment status and finding instead. The
+[Contextual AI guide](https://docs.authrail.io/docs/facts) explains this flow
+and its failure handling.
 
 ### Observe execution outcomes
 
