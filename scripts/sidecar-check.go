@@ -157,7 +157,38 @@ func main() {
 	check(after.Outcome == "approval_required" && effects == 2, "Go restart recovery failed")
 	_, _, err = authrail.RecoverApprovalFrom(ctx, restarted, restored, execute)
 	check(errors.As(err, &blocked) && effects == 2, "Go duplicate start crossed effect boundary")
+	operation.ActionKey = "go-bounded-envelope"
+	largeArguments := map[string]any{"amount": 80, "padding": ""}
+	argumentBytes, err := json.Marshal(largeArguments)
+	must(err)
+	largeArguments["padding"] = strings.Repeat("x", 64*1024-len(argumentBytes))
+	argumentBytes, err = json.Marshal(largeArguments)
+	must(err)
+	largeResult := map[string]any{"padding": strings.Repeat("x", 64*1024-len(`{"padding":""}`))}
+	result, _, after, err = authrail.Enforce(ctx, client, operation, largeArguments,
+		func(_ context.Context, input map[string]any, _ authrail.ExecutionContext) (map[string]any, error) {
+			callbackBytes, encodeErr := json.Marshal(input)
+			must(encodeErr)
+			check(bytes.Equal(callbackBytes, argumentBytes), "Go callback input differs from checked input")
+			effects++
+			return largeResult, nil
+		})
+	must(err)
+	check(result["padding"] == largeResult["padding"] && after.RecordingStatus == "retained" && effects == 3,
+		"Go valid near-limit result was withheld after the effect")
+	operation.ActionKey = "go-unsafe-number"
+	_, _, _, err = authrail.Enforce(ctx, client, operation, struct {
+		Amount int64 `json:"amount"`
+	}{9007199254740993},
+		func(_ context.Context, _ struct {
+			Amount int64 `json:"amount"`
+		}, _ authrail.ExecutionContext) (map[string]any, error) {
+			effects++
+			return map[string]any{}, nil
+		})
+	check(err != nil && effects == 3, "Go rounded numeric input reached the callback")
 	fmt.Println("Go: real sidecar allowed call/result, denial with no effect, persisted permit recovery, and duplicate-start blocking passed.")
+	fmt.Println("Go: near64KiB arguments/result retained through real sidecar; unsafe integer blocked before callback.")
 	privateDER, err := x509.MarshalPKCS8PrivateKey(executor)
 	must(err)
 	input, err := json.Marshal(map[string]any{"actionId": actionID, "client": map[string]any{
@@ -172,7 +203,7 @@ func main() {
 	must(node.Run())
 	mutex.Lock()
 	defer mutex.Unlock()
-	check(reports == 10 && recoveries == 4 && len(starts) == 4, fmt.Sprintf("unexpected fixture transitions reports=%d recoveries=%d starts=%d", reports, recoveries, len(starts)))
+	check(reports == 14 && recoveries == 4 && len(starts) == 6, fmt.Sprintf("unexpected fixture transitions reports=%d recoveries=%d starts=%d", reports, recoveries, len(starts)))
 	fmt.Println("Isolated signed control-plane fixture only: no central persistence or provider-effect acceptance is claimed.")
 }
 

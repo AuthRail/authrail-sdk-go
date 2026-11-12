@@ -71,8 +71,8 @@ func (c *Client) signIdentityProof(call Call, phase string, result json.RawMessa
 
 // encodeIdentityInput matches the language-neutral signed call/result bytes.
 func encodeIdentityInput(call Call, phase string, result json.RawMessage) ([]byte, error) {
-	var args map[string]any
-	if json.Unmarshal(call.Arguments, &args) != nil || args == nil {
+	args, err := decodeInputObject(call.Arguments)
+	if err != nil {
 		return nil, errors.New("Observe arguments are invalid")
 	}
 	input := struct {
@@ -83,8 +83,8 @@ func encodeIdentityInput(call Call, phase string, result json.RawMessage) ([]byt
 		GuardEvidence   []GuardEvidence     `json:"guardEvidence,omitempty"`
 	}{Arguments: args, FactResolutions: call.FactResolutions, Trajectory: call.Trajectory, GuardEvidence: call.GuardEvidence}
 	if phase == "tool_result" {
-		var object map[string]any
-		if json.Unmarshal(result, &object) != nil || object == nil {
+		object, err := decodeInputObject(result)
+		if err != nil {
 			return nil, errors.New("Observe result is invalid")
 		}
 		input.Result, _ = json.Marshal(object)

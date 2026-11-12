@@ -9,13 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
 )
+
+const maxEvaluationRequestBytes = 512 * 1024
 
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 var keyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
@@ -307,6 +308,9 @@ func (c *Client) observeRaw(ctx context.Context, call Call,
 }
 
 func freezeObserveCall(call Call) (Call, error) {
+	if _, err := decodeInputObject(call.Arguments); err != nil {
+		return Call{}, err
+	}
 	encoded, err := json.Marshal(call)
 	if err != nil || len(encoded) > 128*1024 {
 		return Call{}, errors.New("Observe context is invalid")
@@ -381,6 +385,9 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 	if err != nil {
 		return nil, err
 	}
+	if len(body) > maxEvaluationRequestBytes {
+		return nil, errors.New("evaluation request exceeds its size limit")
+	}
 	// Enforce waits for durable decision recording before any protected effect.
 	// Observe remains short-lived; a caller's earlier cancellation still wins.
 	timeout := 2 * time.Second
@@ -411,7 +418,7 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 		return nil, fmt.Errorf("sidecar returned HTTP %d", response.StatusCode)
 	}
 	var decision Decision
-	if err := json.NewDecoder(io.LimitReader(response.Body, 128*1024)).Decode(&decision); err != nil {
+	if err := decodeBoundedResponse(response.Body, 128*1024, &decision); err != nil {
 		return nil, errors.New("sidecar decision is invalid")
 	}
 	if decision.RequestID != call.RequestID || decision.Mode != expectedMode || decision.Enforced ||
@@ -446,12 +453,6 @@ func validOutcome(value string) bool {
 }
 
 func jsonObject(raw json.RawMessage) bool {
-	if len(raw) == 0 || len(raw) > 64*1024 {
-		return false
-	}
-	var value map[string]any
-	if err := json.Unmarshal(raw, &value); err != nil || value == nil {
-		return false
-	}
-	return true
+	_, err := decodeInputObject(raw)
+	return err == nil
 }

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -72,7 +71,7 @@ func Discover(ctx context.Context, config DiscoveryConfig) (Discovery, error) {
 	if response.StatusCode != http.StatusCreated {
 		return result, errors.New("AI system discovery was not accepted; check the setup key and deployment status")
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 8192)).Decode(&result); err != nil {
+	if err := decodeBoundedResponse(response.Body, 8192, &result); err != nil {
 		return Discovery{}, errors.New("AI system discovery returned an invalid response")
 	}
 	if !uuidPattern.MatchString(result.InventoryItemID) ||

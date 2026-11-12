@@ -5,12 +5,43 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestDecisionAndReceiptResponsesRejectUncheckedSuffix(t *testing.T) {
+	for _, suffix := range []string{`{}`, strings.Repeat(" ", 128*1024)} {
+		t.Run(fmt.Sprintf("suffix-%d", len(suffix)), func(t *testing.T) {
+			server := legacySidecarServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/evaluate" {
+					_, _ = fmt.Fprintf(w, `{"requestId":%q,"mode":"observe","enforced":false,"coverage":"evaluated","outcome":"allow"}`, sampleCall().RequestID)
+				} else {
+					_, _ = w.Write([]byte(`{"receiptId":"00000000-0000-4000-8000-000000000001"}`))
+				}
+				_, _ = w.Write([]byte(suffix))
+			}))
+			defer server.Close()
+			client, err := NewClient(testConfig(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.evaluate(context.Background(), sampleCall(), "tool_call", "observe", nil); err == nil {
+				t.Fatal("decision accepted an unchecked response suffix")
+			}
+			var receipt struct {
+				ReceiptID string `json:"receiptId"`
+			}
+			if _, err := client.postLocal(context.Background(), "/execution-receipts", "", map[string]string{}, &receipt, ""); err == nil {
+				t.Fatal("receipt accepted an unchecked response suffix")
+			}
+		})
+	}
+}
 
 func testConfig(url string) Config {
 	return Config{SidecarURL: url, AdapterToken: "abcdefghijklmnopqrstuvwxyz012345",

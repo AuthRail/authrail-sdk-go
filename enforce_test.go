@@ -14,6 +14,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -21,6 +22,72 @@ import (
 const testActionID = "11111111-1111-4111-8111-111111111111"
 const testApprovalID = "22222222-2222-4222-8222-222222222222"
 const testPermitID = "33333333-3333-4333-8333-333333333333"
+
+// Exact Go integers must not execute under a decision over their rounded value.
+func TestEnforceRejectsLossyIntegerBeforeSidecarOrExecution(t *testing.T) {
+	var requests atomic.Int32
+	client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Path == "/evaluate" {
+			var request struct {
+				RequestID string `json:"requestId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			responseJSON(w, 200, map[string]any{"requestId": request.RequestID, "mode": "enforce",
+				"enforced": false, "coverage": "evaluated", "outcome": "allow",
+				"recordingStatus": "retained", "reportReplayed": false, "actionId": testActionID})
+			return
+		}
+		var receipt struct {
+			Event string `json:"event"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&receipt)
+		responseJSON(w, 201, map[string]any{"receiptId": testPermitID,
+			"state": map[string]string{"started": "executing", "succeeded": "succeeded"}[receipt.Event], "replayed": false})
+	})
+	defer closeServer()
+	type payment struct {
+		Amount int64 `json:"amount"`
+	}
+	called := false
+	_, _, _, err := Enforce(context.Background(), client, enforceOperation(), payment{Amount: 9007199254740993},
+		func(_ context.Context, input payment, _ ExecutionContext) (map[string]any, error) {
+			called = true
+			return map[string]any{"amount": input.Amount}, nil
+		})
+	var blocked *EnforceBlockedError
+	if !errors.As(err, &blocked) || blocked.Phase != "tool_call" || called || requests.Load() != 0 {
+		t.Fatalf("lossy numeric input reached a protected boundary: called=%v requests=%d err=%v", called, requests.Load(), err)
+	}
+}
+
+func TestIdentityInputRejectsLossyNumbersWithoutChangingOrdinaryFloats(t *testing.T) {
+	for _, test := range []struct {
+		number string
+		valid  bool
+	}{
+		{"9007199254740993", false}, {"-9007199254740993", false},
+		{"9007199254740993.0", false}, {"9.007199254740993e15", false},
+		{"0.10000000000000001", false}, {"1e-1000000000", false},
+		{"9007199254740992", true}, {"9007199254740994", true},
+		{"0.1", true}, {"1.2300e2", true}, {"1e-7", true},
+		{"0e-1000000000", true}, {"-0", true},
+	} {
+		t.Run(test.number, func(t *testing.T) {
+			call := sampleCall()
+			call.Arguments = json.RawMessage(`{"nested":[{"amount":` + test.number + `}]}`)
+			_, identityErr := encodeIdentityInput(call, "tool_call", nil)
+			_, effectErr := callInputDigest(call)
+			if (identityErr == nil) != test.valid || (effectErr == nil) != test.valid {
+				t.Fatalf("numeric acceptance differs from canonical precision: identity=%v effect=%v", identityErr, effectErr)
+			}
+			_, resultErr := encodeIdentityInput(sampleCall(), "tool_result", call.Arguments)
+			if (resultErr == nil) != test.valid {
+				t.Fatalf("result numeric acceptance differs: %v", resultErr)
+			}
+		})
+	}
+}
 
 func TestGuardProcessingHonoursCancellationEvenWhenHandlerDoesNot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

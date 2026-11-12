@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"sync"
@@ -350,8 +349,8 @@ func executePermitted[Input, Output any](ctx context.Context, client *Client, ca
 }
 
 func callInputDigest(call Call) (string, error) {
-	var arguments map[string]any
-	if json.Unmarshal(call.Arguments, &arguments) != nil || arguments == nil {
+	arguments, err := decodeInputObject(call.Arguments)
+	if err != nil {
 		return "", errors.New("call arguments are invalid")
 	}
 	encoded, err := json.Marshal(struct {
@@ -536,8 +535,7 @@ func (c *Client) postLocal(ctx context.Context, path, idempotencyKey string, bod
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusAccepted {
 		return response.StatusCode, fmt.Errorf("sidecar returned HTTP %d", response.StatusCode)
 	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, 128*1024))
-	if err := decoder.Decode(target); err != nil {
+	if err := decodeBoundedResponse(response.Body, 128*1024, target); err != nil {
 		return response.StatusCode, errors.New("sidecar response is invalid")
 	}
 	return response.StatusCode, nil
