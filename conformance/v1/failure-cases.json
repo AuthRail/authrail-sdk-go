@@ -4,8 +4,8 @@
   "cases": [
     { "name": "decision unavailable", "stage": "decision_unavailable", "effectRuns": false, "error": "blocked_call" },
     { "name": "decision malformed", "stage": "decision_malformed", "effectRuns": false, "error": "blocked_call" },
-    { "name": "start unavailable", "stage": "start_unavailable", "effectRuns": false, "error": "blocked_call" },
-    { "name": "start replayed", "stage": "start_replayed", "effectRuns": false, "error": "blocked_call" },
+    { "name": "start unavailable", "stage": "start_unavailable", "effectRuns": false, "error": "outcome_unknown" },
+    { "name": "start replayed", "stage": "start_replayed", "effectRuns": false, "error": "outcome_unknown" },
     { "name": "provider unknown", "stage": "provider_unknown", "effectRuns": true, "error": "outcome_unknown" },
     { "name": "completion unavailable", "stage": "completion_unavailable", "effectRuns": true, "error": "outcome_unknown" },
     { "name": "result denied", "stage": "result_denied", "effectRuns": true, "error": "blocked_result" },

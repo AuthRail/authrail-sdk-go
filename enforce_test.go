@@ -223,44 +223,99 @@ func TestEnforceRetainsReceiptsAndChecksResult(t *testing.T) {
 }
 
 func TestEnforceBlocksUnprovenStartAndUnknownOutcome(t *testing.T) {
-	for _, lostStart := range []bool{true, false} {
-		t.Run(map[bool]string{true: "lost start", false: "provider unknown"}[lostStart], func(t *testing.T) {
+	for _, failure := range []string{"lost start", "replayed start", "provider unknown"} {
+		t.Run(failure, func(t *testing.T) {
 			called := 0
+			var requestID string
 			client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/evaluate" {
 					var request struct {
 						RequestID string `json:"requestId"`
 					}
 					_ = json.NewDecoder(r.Body).Decode(&request)
+					requestID = request.RequestID
 					responseJSON(w, 200, map[string]any{"requestId": request.RequestID, "mode": "enforce",
 						"enforced": false, "coverage": "evaluated", "outcome": "allow",
 						"recordingStatus": "retained", "reportReplayed": false, "actionId": testActionID})
 					return
 				}
-				if lostStart {
+				if failure == "lost start" {
 					w.WriteHeader(503)
 					return
 				}
-				responseJSON(w, 201, map[string]any{"receiptId": testPermitID, "state": "executing", "replayed": false})
+				responseJSON(w, 201, map[string]any{"receiptId": testPermitID, "state": "executing", "replayed": failure == "replayed start"})
 			})
 			defer closeServer()
+			var checkpoint Recovery
+			client = client.WithExecutionCheckpoint(func(_ context.Context, value Recovery) error {
+				checkpoint = value
+				return nil
+			})
 			_, _, _, err := Enforce(context.Background(), client, enforceOperation(), map[string]any{},
 				func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
 					called++
 					return nil, errors.New("provider timed out")
 				})
-			if lostStart {
-				var blocked *EnforceBlockedError
-				if !errors.As(err, &blocked) || called != 0 {
-					t.Fatalf("start should block: %v, %d", err, called)
-				}
-			} else {
-				var unknown *OutcomeUnknownError
-				if !errors.As(err, &unknown) || called != 1 || unknown.Recovery.ProviderIdempotencyKey != "ar-"+testActionID {
-					t.Fatalf("unknown outcome lost: %v, %d", err, called)
-				}
+			var unknown *OutcomeUnknownError
+			expectedCalls := 0
+			if failure == "provider unknown" {
+				expectedCalls = 1
+			}
+			if !errors.As(err, &unknown) || called != expectedCalls || unknown.Recovery.ActionID != testActionID ||
+				unknown.Recovery.AttemptID != requestID || !digestPattern.MatchString(unknown.Recovery.InputSHA256) ||
+				unknown.Recovery.ProviderIdempotencyKey != "ar-"+testActionID || !reflect.DeepEqual(checkpoint, unknown.Recovery) {
+				t.Fatalf("uncertain start/outcome lost identity or dispatched: %v called=%d", err, called)
 			}
 		})
+	}
+}
+
+func TestExecutionCheckpointFailurePreventsStartWithoutChangingSharedClient(t *testing.T) {
+	var starts atomic.Int32
+	client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/evaluate" {
+			var request struct {
+				RequestID string `json:"requestId"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			responseJSON(w, 200, map[string]any{"requestId": request.RequestID, "mode": "enforce",
+				"enforced": false, "coverage": "evaluated", "outcome": "allow",
+				"recordingStatus": "retained", "reportReplayed": false, "actionId": testActionID})
+			return
+		}
+		var receipt struct {
+			Event string `json:"event"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&receipt)
+		state := "succeeded"
+		if receipt.Event == "started" {
+			starts.Add(1)
+			state = "executing"
+		}
+		responseJSON(w, 201, map[string]any{"receiptId": testPermitID, "state": state, "replayed": false})
+	})
+	defer closeServer()
+	checkpointErr := errors.New("durable checkpoint unavailable")
+	var retained Recovery
+	private := client.WithExecutionCheckpoint(func(_ context.Context, value Recovery) error {
+		retained = value
+		return checkpointErr
+	})
+	called := 0
+	execute := func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+		called++
+		return map[string]any{"ok": true}, nil
+	}
+	_, _, _, err := Enforce(context.Background(), private, enforceOperation(), map[string]any{}, execute)
+	var blocked *EnforceBlockedError
+	if !errors.As(err, &blocked) || !errors.Is(err, checkpointErr) || starts.Load() != 0 || called != 0 ||
+		retained.ActionID != testActionID || !uuidPattern.MatchString(retained.AttemptID) ||
+		!digestPattern.MatchString(retained.InputSHA256) || retained.ProviderIdempotencyKey != "ar-"+testActionID {
+		t.Fatalf("failed checkpoint did not preserve pre-start identity: %v, starts=%d, called=%d", err, starts.Load(), called)
+	}
+	// One request's failing persistence must not change the client's other callers.
+	if _, _, _, err = Enforce(context.Background(), client, enforceOperation(), map[string]any{}, execute); err != nil || starts.Load() != 1 || called != 1 {
+		t.Fatalf("shared client inherited the private checkpoint: %v, starts=%d, called=%d", err, starts.Load(), called)
 	}
 }
 

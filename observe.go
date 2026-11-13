@@ -29,15 +29,16 @@ func validTraceparent(value string) bool {
 
 // Client talks only to a sidecar on the same host. It has no deployment credential.
 type Client struct {
-	endpoint           string
-	token              string
-	http               *http.Client
-	organisationID     string
-	deploymentID       string
-	executorPrivateKey ed25519.PrivateKey
-	clock              func() time.Time
-	guardHandlers      []GuardHandler
-	dataSources        []DataSourceBinding
+	endpoint            string
+	token               string
+	http                *http.Client
+	organisationID      string
+	deploymentID        string
+	executorPrivateKey  ed25519.PrivateKey
+	clock               func() time.Time
+	guardHandlers       []GuardHandler
+	dataSources         []DataSourceBinding
+	executionCheckpoint func(context.Context, Recovery) error
 }
 
 // Config binds one protected application to its local sidecar and signing key.

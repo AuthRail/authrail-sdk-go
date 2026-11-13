@@ -281,6 +281,24 @@ retry a claim or effect. If a start receipt or provider outcome is uncertain,
 inspect the Action and reconcile the provider outcome before considering any
 new attempt.
 
+Current source (not released v0.1.1) supports a private durable checkpoint before
+requesting execution start. Use a request-scoped client so its save hook does not
+change other callers:
+
+```go
+executionClient := client.WithExecutionCheckpoint(func(ctx context.Context, recovery authrail.Recovery) error {
+    return workflowStore.SaveRecovery(ctx, requestKey, recovery)
+})
+```
+
+`workflowStore` is your application's protected durable storage. Pass
+`executionClient` to `Enforce`, `ResumeApproval` or the saved-continuation helpers.
+The SDK waits for the save; failure prevents the start request and callback.
+It does not create a database or background recovery worker. Save the original
+request separately and keep all recovery material outside agent arguments.
+A lost, invalid or replayed start acknowledgement returns `OutcomeUnknownError`
+with the exact recovery identity and never runs this callback.
+
 On `OutcomeUnknownError`, inspect its `Recovery` value and query the provider
 with the original idempotency key. Call `client.Reconcile` only after that
 lookup establishes success or no effect. Until the provider outcome is established, leave it unknown and hold further

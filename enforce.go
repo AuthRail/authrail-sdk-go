@@ -41,7 +41,8 @@ type Recovery struct {
 	Traceparent            string
 }
 
-// OutcomeUnknownError never authorizes a retry of the business effect.
+// OutcomeUnknownError retains uncertain execution ownership or outcome. It never
+// authorizes a retry of the business effect, including after a replayed start.
 type OutcomeUnknownError struct {
 	Cause    error
 	Recovery Recovery
@@ -158,6 +159,17 @@ func retainedApproval(decision *Decision) bool {
 
 // ExecutionContext must be persisted with the provider request for recovery.
 type ExecutionContext = Recovery
+
+// WithExecutionCheckpoint binds a private durable save to this execution without
+// changing the shared client. A failed checkpoint prevents execution start.
+func (c *Client) WithExecutionCheckpoint(checkpoint func(context.Context, Recovery) error) *Client {
+	if c == nil {
+		return nil
+	}
+	copy := *c
+	copy.executionCheckpoint = checkpoint
+	return &copy
+}
 
 // Enforce checks the call before invoking the protected function, retains a
 // signed start receipt, and checks the result before returning it to the agent.
@@ -308,9 +320,24 @@ func executePermitted[Input, Output any](ctx context.Context, client *Client, ca
 	if err := json.Unmarshal(call.Arguments, &input); err != nil {
 		return zero, nil, &EnforceBlockedError{Phase: "tool_call", Decision: decision, Cause: err}
 	}
+	if client.executionCheckpoint != nil {
+		checkpoint := recovery
+		if recovery.PermitID != nil {
+			permit := *recovery.PermitID
+			checkpoint.PermitID = &permit
+		}
+		if err := client.executionCheckpoint(ctx, checkpoint); err != nil {
+			return zero, nil, &EnforceBlockedError{Phase: "tool_call", Decision: decision, Cause: err}
+		}
+	}
 	start, err := client.reportExecution(ctx, recovery, "started", nil)
 	if err != nil || start.State != "executing" || start.Replayed == nil || *start.Replayed {
-		return zero, nil, &EnforceBlockedError{Phase: "tool_call", Decision: decision, Cause: err}
+		if err == nil {
+			err = errors.New("execution start was not freshly acknowledged")
+		}
+		// A missing or replayed acknowledgement cannot dispatch, but may describe
+		// retained work owned by an earlier attempt. Keep its exact recovery identity.
+		return zero, nil, &OutcomeUnknownError{Cause: err, Recovery: recovery}
 	}
 	result, toolErr := execute(ctx, input, recovery)
 	if toolErr != nil {
