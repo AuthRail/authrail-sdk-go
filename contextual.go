@@ -102,6 +102,9 @@ func (c *Client) readContextual(ctx context.Context, call Call, phase string, re
 	if !uuidPattern.MatchString(plan.BundleID) || plan.Coverage != "evaluated" {
 		return nil, errors.New("Contextual AI requirements are invalid")
 	}
+	if expected := bundleExpectation(call); expected != nil && (plan.BundleID != expected.BundleID || plan.Sequence != expected.Sequence) {
+		return nil, errConfigurationChanged
+	}
 	if plan.DisclosureProcessing || len(plan.DisclosureRequirements) > 0 {
 		if !contextualDisclosureReady(plan, call, phase, result) {
 			return nil, nil

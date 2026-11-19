@@ -574,3 +574,71 @@ control-plane fixture does not prove tenant persistence or provider effects.
 It needs no deployment secrets. CI does not create release tags.
 
 Maintainers: see [Releasing](RELEASING.md) for checked artifacts and publication setup.
+
+
+## Current source: durable approval and configuration renewal
+
+This section describes unreleased source. Use it with the matching updated sidecar
+source. Published SDK 0.1.1 and sidecar 0.2.0 do not establish support for these new
+contracts. A new SDK fails closed against an older sidecar that rejects the
+configuration expectation; it does not silently omit that check.
+
+The SDK prepares Guard processing, Data facts and permitted contextual material
+for an exact bundle. It sends that bundle/sequence as a denial-only expectation.
+If configuration changed before the sidecar retained a decision, the sidecar
+returns the exact `configuration_changed` conflict. The SDK rebuilds preparation
+once from the original private input. A generic conflict, denied decision, network
+error or execution-start uncertainty never triggers this retry. This keeps an
+unchanged renewal from double-transforming input or repeating a business effect.
+
+After a completed effect, the same bounded retry can repeat result preparation
+and checking only. If current argument processing is needed for contextual
+material disclosure, its output must still equal the executed input. A changed
+output, unsupported requirement or repeated configuration change withholds the
+result. Result withholding does not undo an effect or authorise another call.
+
+Pending human requests survive the `expiresAt` freshness deadline. Read their
+current state and `requiresRefresh` separately. A fresh decision is needed before
+stale work can execute; earlier votes do not approve that new decision. Refresh
+keeps the original business key, caller, resource and exact processed arguments,
+uses a new attempt, and rereads configured Data sources. Applications supply
+current manual facts/trajectory explicitly when needed. A valid existing permit
+is recovered through the original recover method; unknown effects are reconciled
+using their original recovery identity.
+
+New approval continuations retain original private arguments alongside the
+processed call so refresh never transforms already transformed input. Encrypt
+and tenant-scope that state in application-owned storage. Existing saved
+continuations still support exact claim/recovery. A legacy continuation with
+processing evidence and no original input cannot safely refresh transformed
+arguments; restore that input through the application's protected workflow.
+
+Provider references in execution/reconciliation receipts are opaque UTF-8 evidence
+of at most 4000 bytes, with no control characters or surrounding whitespace. They
+may contain paths and punctuation. They never select a provider endpoint or grant
+execution authority. The business idempotency key retains its separate strict
+format. A `started` receipt has no provider reference; reconciliation needs one.
+
+`Client.ApprovalStatus(ctx, saved)` returns durable state and `RequiresRefresh`.
+`RefreshApprovalFrom(ctx, client, saved, execute, options...)` requests a fresh
+unstarted decision; optional `RefreshApprovalOptions` supplies current manual facts
+and trajectory. When approval is still required, the returned `ApprovalRequired`
+error exposes the replacement through `Continuation()`. Ordinary
+`ResumeApprovalFrom` and `RecoverApprovalFrom` preserve the original checked call.
+
+## Secure transport and workload boundary
+
+The customer-hosted SDK keeps its sidecar on the same host. Literal loopback HTTP
+is supported for local development; HTTPS loopback URLs use the runtime's normal
+TLS certificate and hostname verification. HTTPS already supplies TLS: no extra
+encryption layer is added. Configure trust for the sidecar certificate and keep
+verification enabled. Redirects are not followed with the adapter credential.
+API/provider network calls require verified HTTPS in production. Local HTTP or a
+Unix socket is not evidence of production network TLS configuration.
+
+OpenShell can optionally contain a workload the application operator controls.
+It does not replace Rail checks or wrap the internals of hosted ChatGPT/Claude.
+Build a real protected application with private credentials, an authenticated
+caller/resource boundary, durable execution checkpoints and one protected callback.
+Keep the reference demo optional; never give an agent an unrestricted alternate
+path to the same business credentials.

@@ -35,7 +35,7 @@ func (c *Client) ReportObservedExecution(ctx context.Context, call Call, outcome
 	var recorded ObservedExecutionRecording
 	validEvent := outcome.Event == "succeeded" || outcome.Event == "failed" || outcome.Event == "unknown" || outcome.Event == "reconciled_succeeded" || outcome.Event == "reconciled_failed"
 	if !uuidPattern.MatchString(call.RequestID) || !uuidPattern.MatchString(call.OperationVersionID) || !keyPattern.MatchString(call.ActionKey) || !validTraceparent(call.Traceparent) ||
-		!validEvent || !keyPattern.MatchString(outcome.ProviderIdempotencyKey) || (outcome.ProviderReference != nil && !keyPattern.MatchString(*outcome.ProviderReference)) ||
+		!validEvent || !keyPattern.MatchString(outcome.ProviderIdempotencyKey) || (outcome.ProviderReference != nil && !validProviderReference(*outcome.ProviderReference)) ||
 		((outcome.Event == "reconciled_succeeded" || outcome.Event == "reconciled_failed") && outcome.ProviderReference == nil) {
 		return recorded, errors.New("observed execution outcome is invalid")
 	}

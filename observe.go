@@ -16,6 +16,13 @@ import (
 	"time"
 )
 
+var errConfigurationChanged = errors.New("sidecar configuration changed before evaluation")
+
+type expectedBundle struct {
+	BundleID string `json:"bundleId"`
+	Sequence int64  `json:"sequence"`
+}
+
 const maxEvaluationRequestBytes = 512 * 1024
 
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -150,13 +157,13 @@ type Observation struct {
 	ResultError    error
 }
 
-// NewClient accepts only loopback HTTP and caps check latency so local decisions
+// NewClient accepts only loopback HTTP/HTTPS and caps check latency so local decisions
 // cannot redirect or indefinitely delay the protected application.
 func NewClient(config Config) (*Client, error) {
 	u, err := url.Parse(config.SidecarURL)
-	if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
 		u.Path != "" || u.Hostname() != "127.0.0.1" && u.Hostname() != "::1" {
-		return nil, errors.New("sidecar URL must be a local HTTP address")
+		return nil, errors.New("sidecar URL must be a local HTTP/HTTPS address")
 	}
 	if len(config.AdapterToken) < 32 {
 		return nil, errors.New("adapter token must have at least 32 characters")
@@ -335,6 +342,16 @@ func newRequestID() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16]), nil
 }
 
+func bundleExpectation(call Call) *expectedBundle {
+	if call.guardBundleID != "" {
+		return &expectedBundle{call.guardBundleID, call.guardSequence}
+	}
+	if call.dataBundleID != "" {
+		return &expectedBundle{call.dataBundleID, call.dataSequence}
+	}
+	return nil
+}
+
 func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode string, result json.RawMessage) (*Decision, error) {
 	if c.dataSources != nil && call.dataPhase != phase {
 		var err error
@@ -346,6 +363,9 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 	if call.ReviewSummary != nil && expectedMode != "enforce" {
 		return nil, errors.New("review summary requires an Enforce call")
 	}
+	if call.guardBundleID != "" && call.dataBundleID != "" && (call.guardBundleID != call.dataBundleID || call.guardSequence != call.dataSequence) {
+		return nil, errConfigurationChanged
+	}
 	findings, err := c.readContextual(ctx, call, phase, result)
 	if err != nil {
 		return nil, err
@@ -355,6 +375,7 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 		return nil, err
 	}
 	body, err := json.Marshal(struct {
+		ExpectedBundle     *expectedBundle     `json:"expectedBundle,omitempty"`
 		FormatVersion      int                 `json:"formatVersion"`
 		RequestID          string              `json:"requestId"`
 		OperationVersionID string              `json:"operationVersionId"`
@@ -368,7 +389,7 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 		ReviewSummary      *ReviewSummary      `json:"reviewSummary,omitempty"`
 		Attribution        attribution         `json:"attribution"`
 		IdentityProof      identityProof       `json:"identityProof"`
-	}{FormatVersion: 1, RequestID: call.RequestID, OperationVersionID: call.OperationVersionID,
+	}{ExpectedBundle: bundleExpectation(call), FormatVersion: 1, RequestID: call.RequestID, OperationVersionID: call.OperationVersionID,
 		Phase: phase, Arguments: call.Arguments, Result: result,
 		FactResolutions:    call.FactResolutions,
 		Trajectory:         call.Trajectory,
@@ -415,6 +436,12 @@ func (c *Client) evaluate(ctx context.Context, call Call, phase, expectedMode st
 		return nil, fmt.Errorf("sidecar unavailable: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusConflict {
+		var conflict map[string]string
+		if decodeBoundedResponse(response.Body, 128, &conflict) == nil && len(conflict) == 1 && conflict["code"] == "configuration_changed" {
+			return nil, errConfigurationChanged
+		}
+	}
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("sidecar returned HTTP %d", response.StatusCode)
 	}

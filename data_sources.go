@@ -167,7 +167,7 @@ func dataUnavailable(id string, c dataSourceContract, key string) FactResolution
 
 // prepareDataCall returns a detached call so permission claims and receipts retain
 // the exact facts signed for the original request, including across approval resume.
-func (c *Client) prepareDataCall(ctx context.Context, call Call, phase string) (Call, error) {
+func (c *Client) prepareDataCall(ctx context.Context, call Call, phase string, refreshRetained ...bool) (Call, error) {
 	if c.dataSources == nil {
 		return call, nil
 	}
@@ -204,6 +204,9 @@ func (c *Client) prepareDataCall(ctx context.Context, call Call, phase string) (
 	if json.Unmarshal(body, &top) != nil || len(top) != 7 {
 		return call, invalidData()
 	}
+	if call.guardBundleID != "" && (*plan.BundleID != call.guardBundleID || plan.Sequence != call.guardSequence) {
+		return call, errConfigurationChanged
+	}
 	contracts := make([]dataSourceContract, len(plan.Requirements))
 	ids := map[string]bool{}
 	for i, r := range plan.Requirements {
@@ -219,6 +222,9 @@ func (c *Client) prepareDataCall(ctx context.Context, call Call, phase string) (
 	manual := []FactResolution{}
 	seen := map[string]bool{}
 	for _, fact := range call.FactResolutions {
+		if len(refreshRetained) > 0 && refreshRetained[0] && ids[fact.SourceVersionID] {
+			continue
+		}
 		if seen[fact.SourceVersionID] || (phase == "tool_call" && ids[fact.SourceVersionID]) {
 			return call, invalidData()
 		}

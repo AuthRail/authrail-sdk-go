@@ -1183,3 +1183,192 @@ func TestObservedExecutionSignsExactAttemptWithoutPermit(t *testing.T) {
 		t.Fatal("observed outcome accepted a start or issued another request")
 	}
 }
+
+// A configuration conflict is retryable only before retention; start and effects stay single-use.
+func TestEnforceConfigurationRenewalRepreparesOriginalInput(t *testing.T) {
+	for _, mode := range []string{"renew_once", "repeated_change", "other_conflict"} {
+		t.Run(mode, func(t *testing.T) {
+			bundleID, sequence := testPermitID, int64(1)
+			effects := 0
+			checks := map[string]int{}
+			handlerVersion := strings.Repeat("a", 64)
+			client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/guard-requirements":
+					phase := r.URL.Query().Get("phase")
+					root := "arguments"
+					if phase == "tool_result" {
+						root = "result"
+					}
+					responseJSON(w, 200, guardPlan{FormatVersion: 1, OperationVersionID: enforceOperation().VersionID, Phase: phase, BundleID: bundleID, Sequence: sequence, Coverage: "evaluated", Requirements: []GuardRequirement{{RailVersionID: testActionID, RuleID: "clean", Kind: "sanitize", HandlerID: "append", HandlerVersion: handlerVersion, Target: GuardTarget{Root: root, Path: []string{"text"}}}}})
+				case "/evaluate":
+					var body struct {
+						RequestID      string            `json:"requestId"`
+						Phase          string            `json:"phase"`
+						Arguments      map[string]string `json:"arguments"`
+						Result         map[string]string `json:"result"`
+						ExpectedBundle expectedBundle    `json:"expectedBundle"`
+						GuardEvidence  []GuardEvidence   `json:"guardEvidence"`
+					}
+					if json.NewDecoder(r.Body).Decode(&body) != nil || body.ExpectedBundle.BundleID != bundleID || body.ExpectedBundle.Sequence != sequence || body.Arguments["text"] != "input!" {
+						t.Error("preparation did not retain exact original input/fence")
+					}
+					checks[body.Phase]++
+					if mode != "renew_once" || checks[body.Phase] == 1 {
+						code := "configuration_changed"
+						if mode == "other_conflict" {
+							code = "unrelated_conflict"
+						}
+						sequence++
+						bundleID = fmt.Sprintf("77777777-7777-4777-8777-%012d", sequence)
+						responseJSON(w, 409, map[string]string{"code": code})
+						return
+					}
+					if body.Phase == "tool_result" {
+						if body.Result["text"] != "output!" {
+							t.Error("result transformed twice")
+						}
+						for _, proof := range body.GuardEvidence {
+							if proof.BundleID != bundleID {
+								t.Error("stale disclosure evidence")
+							}
+						}
+					}
+					responseJSON(w, 200, map[string]any{"requestId": body.RequestID, "mode": "enforce", "enforced": false, "coverage": "evaluated", "outcome": "allow", "recordingStatus": "retained", "reportReplayed": false, "actionId": testActionID, "bundleId": bundleID, "sequence": sequence})
+				case "/execution-receipts":
+					var body struct {
+						Event string `json:"event"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					state := "succeeded"
+					if body.Event == "started" {
+						state = "executing"
+					}
+					responseJSON(w, 201, map[string]any{"receiptId": testPermitID, "state": state, "replayed": false})
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(500)
+				}
+			}, GuardHandler{ID: "append", Version: handlerVersion, Kind: "sanitize", Process: func(_ context.Context, value string) (string, error) { return value + "!", nil }})
+			defer closeServer()
+			output, _, _, err := Enforce(context.Background(), client, enforceOperation(), map[string]string{"text": "input"}, func(_ context.Context, args map[string]string, _ ExecutionContext) (map[string]string, error) {
+				effects++
+				if args["text"] != "input!" {
+					t.Error("callback transformed twice")
+				}
+				return map[string]string{"text": "output"}, nil
+			})
+			if mode == "renew_once" {
+				if err != nil || effects != 1 || output["text"] != "output!" || checks["tool_call"] != 2 || checks["tool_result"] != 2 {
+					t.Fatalf("renewal failed: %v effects=%d checks=%v", err, effects, checks)
+				}
+			} else {
+				want := 2
+				if mode == "other_conflict" {
+					want = 1
+				}
+				if err == nil || effects != 0 || checks["tool_call"] != want {
+					t.Fatalf("conflict retried unsafely: %v effects=%d checks=%v", err, effects, checks)
+				}
+			}
+		})
+	}
+}
+
+func TestApprovalStatusRefreshPreservesIntentWithoutOldVotes(t *testing.T) {
+	checks, effects := 0, 0
+	originalRequest := ""
+	client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			RequestID         string         `json:"requestId"`
+			ActionID          string         `json:"actionId"`
+			ApprovalRequestID string         `json:"approvalRequestId"`
+			InputSHA256       string         `json:"inputSha256"`
+			KeySHA256         string         `json:"keySha256"`
+			Proof             identityProof  `json:"proof"`
+			Arguments         map[string]int `json:"arguments"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if r.URL.Path == "/approval-permits/status" {
+			responseJSON(w, 200, map[string]any{"actionId": testActionID, "approvalRequestId": testApprovalID, "state": "permit_issued", "requiresRefresh": true, "expiresAt": time.Now().Add(-time.Minute)})
+			return
+		}
+		if r.URL.Path != "/evaluate" {
+			t.Error("refresh claimed permission or dispatched")
+			w.WriteHeader(500)
+			return
+		}
+		checks++
+		approval := testApprovalID
+		if checks == 1 {
+			originalRequest = body.RequestID
+		} else {
+			if body.RequestID == originalRequest {
+				t.Error("refresh reused original attempt")
+			}
+			approval = testPermitID
+		}
+		if body.Arguments["amount"] != 80 {
+			t.Error("changed business input")
+		}
+		responseJSON(w, 200, map[string]any{"requestId": body.RequestID, "mode": "enforce", "enforced": false, "coverage": "evaluated", "outcome": "approval_required", "recordingStatus": "retained", "reportReplayed": false, "actionId": testActionID, "approvalRequestId": approval})
+	})
+	defer closeServer()
+	execute := func(_ context.Context, args map[string]int, _ ExecutionContext) (map[string]int, error) {
+		effects++
+		return args, nil
+	}
+	_, _, _, err := Enforce(context.Background(), client, enforceOperation(), map[string]int{"amount": 80}, execute)
+	var pending *ApprovalRequired
+	if !errors.As(err, &pending) {
+		t.Fatal("missing initial approval")
+	}
+	saved, err := pending.Continuation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.ApprovalStatus(context.Background(), saved)
+	if err != nil || !status.RequiresRefresh || status.State != "permit_issued" {
+		t.Fatal("lost durable approval freshness")
+	}
+	_, _, err = RefreshApprovalFrom(context.Background(), client, saved, execute)
+	if !errors.As(err, &pending) || pending.Decision.ApprovalRequestID != testPermitID || pending.call.ActionKey != saved.Call.ActionKey || effects != 0 {
+		t.Fatalf("fresh review reused permission: %v effects=%d", err, effects)
+	}
+}
+
+func TestReconciliationOpaqueReferenceValidation(t *testing.T) {
+	delivered := []string{}
+	client, closeServer := enforceFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/execution-receipts" {
+			t.Errorf("unexpected execution target %s", r.URL.Path)
+		}
+		var body struct {
+			Event             string `json:"event"`
+			ProviderReference string `json:"providerReference"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			t.Error("invalid receipt")
+		}
+		delivered = append(delivered, body.ProviderReference)
+		if body.Event != "reconciled_succeeded" {
+			t.Error("not a reconciliation")
+		}
+		responseJSON(w, 201, map[string]any{"receiptId": testPermitID, "state": "succeeded", "replayed": false})
+	})
+	defer closeServer()
+	recovery := Recovery{ActionID: testActionID, AttemptID: testApprovalID, InputSHA256: strings.Repeat("a", 64), ProviderIdempotencyKey: "ar-" + testActionID}
+	for _, reference := range []string{"projects/acme/jobs/1?x=a&b=<value>", strings.Repeat("é", 2000)} {
+		if _, err := client.Reconcile(context.Background(), recovery, reference, "succeeded"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, reference := range []string{" bad", "bad\nref", "bad\x7fref", strings.Repeat("é", 2001)} {
+		if _, err := client.Reconcile(context.Background(), recovery, reference, "succeeded"); err == nil {
+			t.Fatal("invalid reference delivered")
+		}
+	}
+	if len(delivered) != 2 {
+		t.Fatalf("reference validation leaked delivery: %d", len(delivered))
+	}
+}
